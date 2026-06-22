@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Info, Magnet, Palette, PanelRight, Settings, Terminal, Trash2, Type, X } from "lucide-react";
+import { Check, Copy, Info, Palette, PanelRight, Settings, Type, X, Zap } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -42,25 +42,23 @@ type Prefs = {
 };
 
 const DEFAULT_PREFS: Prefs = {
-  theme: "cream",
+  theme: "linen",
   font_face: "system",
   font_size: "medium",
   dock_mode: "terminal",
   attach_side: "right",
-  dock_width: 300,
-  dock_height: 420,
+  dock_width: 360,
+  dock_height: 620,
   follow: true
 };
 
-const THEMES: { id: string; name: string; surface: string; accent: string }[] = [
-  { id: "cream", name: "暖米", surface: "#f7f4ee", accent: "#216a59" },
-  { id: "paper", name: "纸白", surface: "#fbfbf9", accent: "#4f46e5" },
-  { id: "sky", name: "天青", surface: "#eef3fa", accent: "#2d72d2" },
-  { id: "mint", name: "薄荷", surface: "#ecf6f0", accent: "#0e9e6e" },
-  { id: "blossom", name: "樱粉", surface: "#fbeef2", accent: "#d1518a" },
-  { id: "amber", name: "暖阳", surface: "#faf2e7", accent: "#cd7a2c" },
-  { id: "lilac", name: "薰衣草", surface: "#f2eefb", accent: "#7c5cd6" },
-  { id: "dark", name: "深色", surface: "#262b33", accent: "#4cc2a4" }
+const THEMES: { id: string; name: string; bg: string; a: string; b: string }[] = [
+  { id: "midnight", name: "午夜", bg: "#0e1014", a: "#3fcf8e", b: "#d97757" },
+  { id: "graphite", name: "石墨", bg: "#161618", a: "#57d4a1", b: "#e08a63" },
+  { id: "ember", name: "暖炭", bg: "#150f0b", a: "#5fcf8e", b: "#ff8c5a" },
+  { id: "indigo", name: "靛蓝", bg: "#13152b", a: "#5be0a8", b: "#ff9b6b" },
+  { id: "linen", name: "亚麻", bg: "#f4f0e7", a: "#18895a", b: "#bf552f" },
+  { id: "slate", name: "石板", bg: "#f1f3f6", a: "#0f9b69", b: "#c2562f" }
 ];
 
 const browserKey = "askdock.browser.questions";
@@ -102,7 +100,8 @@ async function browserCommand<T>(name: string, args: Record<string, unknown>): P
     return undefined as T;
   }
   if (name === "get_prefs") {
-    return DEFAULT_PREFS as T;
+    const t = new URLSearchParams(location.search).get("theme");
+    return { ...DEFAULT_PREFS, ...(t ? { theme: t } : {}) } as T;
   }
   if (name === "open_settings") {
     location.hash = "#settings";
@@ -123,9 +122,16 @@ function readBrowserQuestions(): CapturedQuestion[] {
     /* ignore */
   }
   const now = Date.now();
+  const mk = (id: string, source: string, text: string, ms: number): CapturedQuestion => ({
+    id, window_id: BROWSER_WINDOW_ID, source, session_id: null, cwd: null, text, asked_at: new Date(now - ms).toISOString()
+  });
   const sample: CapturedQuestion[] = [
-    { id: "1", window_id: BROWSER_WINDOW_ID, source: "claude", session_id: null, cwd: null, text: "帮我把登录页移动端按钮被遮住的问题修一下", asked_at: new Date(now - 120000).toISOString() },
-    { id: "2", window_id: BROWSER_WINDOW_ID, source: "codex", session_id: null, cwd: null, text: "这个接口为什么 500，看下日志", asked_at: new Date(now - 600000).toISOString() }
+    mk("1", "codex", "你开一个新的分支，将这些问题，用去控件化处理一下。", 2 * 60000),
+    mk("2", "codex", "现在的元素都包了边框、底色、阴影、强调色块，控件感太强，于是显得“重”。看看是不是有这个问题？", 6 * 60000),
+    mk("3", "claude", "把时间戳和来源都换成等宽字体，整体节奏会更像终端日志，也更耐看。", 90 * 60000),
+    mk("4", "claude", "左侧用一条连续的时间轴串起所有提问，最新的一条让它像光标一样在跳。", 110 * 60000),
+    mk("5", "codex", "删除按钮先去掉。归档面板的重点是回看和复用，不是管理，操作越少越安静。", 26 * 3600000),
+    mk("6", "claude", "内容直接占满整行，不要卡片。让文字本身成为主角，留白来分隔，而不是边框。", 30 * 3600000)
   ];
   writeBrowserQuestions(sample);
   return sample;
@@ -137,14 +143,27 @@ function writeBrowserQuestions(items: CapturedQuestion[]) {
 
 function sourceLabel(source: string) {
   if (source === "codex") return "Codex";
-  if (source === "claude") return "Claude";
+  if (source === "claude") return "Claude Code";
   return source;
 }
 
-function formatTime(value: string) {
+function timeLabel(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+}
+
+// 时间线按天分隔：今天 / 昨天 / MM / DD
+function dayLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOf(new Date()) - startOf(date)) / 86400000);
+  if (days === 0) return "今天";
+  if (days === 1) return "昨天";
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${mm} / ${dd}`;
 }
 
 function useApplyAppearance(prefs: Prefs) {
@@ -179,6 +198,7 @@ function Dock() {
   const [message, setMessage] = React.useState("");
   const [freeMode, setFreeMode] = React.useState(false);
   const [prefs, setPrefs] = React.useState<Prefs>(DEFAULT_PREFS);
+  const [copiedId, setCopiedId] = React.useState<string | null>(null);
 
   const windowIdRef = React.useRef<string | null>(null);
   windowIdRef.current = windowId;
@@ -273,11 +293,6 @@ function Dock() {
     };
   }, []);
 
-  async function removeItem(item: CapturedQuestion) {
-    await command("delete_question", { id: item.id });
-    await refresh(windowId);
-  }
-
   async function clearAll() {
     if (!windowId) return;
     await command("clear_window", { windowId });
@@ -292,57 +307,83 @@ function Dock() {
     }
   }
 
+  const copyTimer = React.useRef<number | undefined>(undefined);
+  function copy(item: CapturedQuestion) {
+    navigator.clipboard?.writeText(item.text).catch(() => undefined);
+    setCopiedId(item.id);
+    window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopiedId(null), 1400);
+  }
+
+  // 按天分组：插入日期分隔，并标出最新一条（节点会跳动）
+  let prevDay = "";
+  const rows = questions.map((q, index) => {
+    const day = dayLabel(q.asked_at);
+    const showMark = day !== prevDay;
+    prevDay = day;
+    return { q, latest: index === 0, day, showMark };
+  });
+
   return (
     <main className="dock">
       <header className="titlebar" data-tauri-drag-region onPointerDown={() => { holdingTitle.current = true; }}>
-        <strong>AskDock</strong>
-        <div className="spacer" />
+        <span className="brand">AskDock</span>
         <button
-          className={`toggleBtn ${freeMode ? "" : "on"}`}
+          className={`ic ${freeMode ? "" : "live"}`}
           type="button"
           onClick={() => setFreeMode((v) => !v)}
-          title={freeMode ? "自由位置 · 点击重新贴靠终端" : "贴靠中 · 点击解锁后可拖动标题栏移动"}
+          title={freeMode ? "自由位置 · 点击重新贴靠终端" : "实时贴靠中 · 点击解锁后可拖动标题栏移动"}
         >
-          <Magnet size={16} />
+          <Zap size={15} />
         </button>
-        <button className="closeBtn" type="button" onClick={hideWindow} title="关闭（点托盘图标可重新打开）">
-          <X size={16} />
+        <button className="ic" type="button" onClick={hideWindow} title="关闭（点托盘图标可重新打开）">
+          <X size={15} />
         </button>
       </header>
 
-      <div className="windowBar">
-        <Terminal size={14} />
-        <span>{windowId ? appName ?? "终端" : "等待终端窗口"}</span>
-        <div className="spacer" />
-        {questions.length ? <button className="linkBtn" type="button" onClick={clearAll}>清空</button> : null}
+      <div className="sessionbar">
+        <div className="session">
+          <span className="pr">&gt;_</span>
+          <span className="nm">{windowId ? appName ?? "终端" : "等待终端窗口"}</span>
+        </div>
+        {questions.length ? <button className="clear" type="button" onClick={clearAll}>清空</button> : null}
       </div>
 
-      <div className="qList">
+      <div className="stream">
         {questions.length === 0 ? (
-          <div className="empty">
-            在这个终端窗口里问 Claude / Codex，<br />提问会自动出现在这里
+          <div className="streamEmpty">
+            在终端里问 Claude / Codex，<br />提问会顺着时间线出现在这里
           </div>
         ) : (
-          questions.map((q) => (
-            <article key={q.id} className="qItem">
-              <div className="qHead">
-                <span className={`qBadge ${q.source}`}>{sourceLabel(q.source)}</span>
-                <span className="qTime">{formatTime(q.asked_at)}</span>
-                <button className="qDel" type="button" onClick={() => removeItem(q)} title="删除">
-                  <Trash2 size={13} />
+          rows.map(({ q, latest, day, showMark }) => (
+            <React.Fragment key={q.id}>
+              {showMark ? (
+                <div className="daymark"><span>{day}</span><div className="rule" /></div>
+              ) : null}
+              <article className={`entry ${latest ? "latest" : ""}`} data-src={q.source}>
+                <div className="node" />
+                <button className={`copy ${copiedId === q.id ? "done" : ""}`} type="button" title="复制" onClick={() => copy(q)}>
+                  {copiedId === q.id ? <Check size={13} /> : <Copy size={13} />}
                 </button>
-              </div>
-              <p className="qText">{q.text}</p>
-            </article>
+                <div className="meta">
+                  <span className="src">{sourceLabel(q.source)}</span>
+                  <span className="dot" />
+                  <span>{timeLabel(q.asked_at)}</span>
+                </div>
+                <div className="body">{q.text}</div>
+              </article>
+            </React.Fragment>
           ))
         )}
       </div>
 
-      {message ? <div className="statusText">{message}</div> : null}
-
-      <footer className="footerBar">
-        <button className="footerBtn" type="button" onClick={() => command("open_settings").catch(() => undefined)}>
-          <Settings size={15} /> 设置
+      <footer className="footer">
+        <div className="status">
+          <span className="pin" />
+          <span>{freeMode ? "自由位置（已停止贴靠）" : message || "等待终端窗口"}</span>
+        </div>
+        <button className="settings" type="button" onClick={() => command("open_settings").catch(() => undefined)}>
+          <Settings size={14} /> <span>设置</span>
         </button>
       </footer>
     </main>
@@ -420,15 +461,17 @@ function SettingsPage() {
                     key={t.id}
                     type="button"
                     className={`swatch ${prefs.theme === t.id ? "on" : ""}`}
-                    style={{ ["--sw-surface"]: t.surface, ["--sw-accent"]: t.accent } as React.CSSProperties}
                     onClick={() => update({ theme: t.id })}
-                    title={t.name}
                   >
-                    <span className="swatchDot" />
+                    <span className="dotpair">
+                      <span className="d" style={{ background: t.bg, border: "1px solid rgba(125,125,135,.4)" }} />
+                      <span className="d" style={{ background: t.a }} />
+                      <span className="d" style={{ background: t.b }} />
+                    </span>
+                    {t.name}
                   </button>
                 ))}
               </div>
-              <div className="swatchName">{THEMES.find((t) => t.id === prefs.theme)?.name ?? "自定义"}</div>
             </div>
           </>
         )}

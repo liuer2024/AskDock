@@ -192,13 +192,13 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
         );
 
         INSERT OR IGNORE INTO settings (key, value) VALUES
-          ('theme', 'cream'),
+          ('theme', 'linen'),
           ('font_face', 'system'),
           ('font_size', 'medium'),
           ('dock_mode', 'terminal'),
           ('attach_side', 'right'),
-          ('dock_width', '300'),
-          ('dock_height', '420'),
+          ('dock_width', '360'),
+          ('dock_height', '620'),
           ('dock_gap', '8'),
           ('follow_terminal', '1');
         "#,
@@ -296,13 +296,13 @@ fn clear_window(db: State<'_, Db>, window_id: String) -> Result<(), String> {
 fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
     let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
     Ok(Prefs {
-        theme: get_str_setting(&conn, "theme", "cream"),
+        theme: get_str_setting(&conn, "theme", "linen"),
         font_face: get_str_setting(&conn, "font_face", "system"),
         font_size: get_str_setting(&conn, "font_size", "medium"),
         dock_mode: get_str_setting(&conn, "dock_mode", "terminal"),
         attach_side: get_str_setting(&conn, "attach_side", "right"),
-        dock_width: get_i32_setting(&conn, "dock_width", 300),
-        dock_height: get_i32_setting(&conn, "dock_height", 420),
+        dock_width: get_i32_setting(&conn, "dock_width", 360),
+        dock_height: get_i32_setting(&conn, "dock_height", 620),
         follow: get_i32_setting(&conn, "follow_terminal", 1) != 0,
     })
 }
@@ -404,8 +404,8 @@ fn reposition_dock(app: &AppHandle, db: &State<'_, Db>, terminal: Option<Rect>) 
         (
             get_str_setting(&conn, "dock_mode", "terminal"),
             get_str_setting(&conn, "attach_side", "right"),
-            get_i32_setting(&conn, "dock_width", 300),
-            get_i32_setting(&conn, "dock_height", 420),
+            get_i32_setting(&conn, "dock_width", 360),
+            get_i32_setting(&conn, "dock_height", 620),
             get_i32_setting(&conn, "dock_gap", 8),
             get_i32_setting(&conn, "follow_terminal", 1) != 0,
         )
