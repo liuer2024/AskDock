@@ -44,6 +44,7 @@ struct Prefs {
     font_size: String,
     glass: String,
     corner_radius: String,
+    filter_rules: String,
     dock_mode: String,
     attach_side: String,
     dock_width: i32,
@@ -208,6 +209,7 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
           ('font_size', 'medium'),
           ('glass', 'off'),
           ('corner_radius', '0,0,0,0'),
+          ('filter_rules', '继续' || char(10) || '你好'),
           ('dock_mode', 'terminal'),
           ('attach_side', 'right'),
           ('dock_width', '360'),
@@ -318,6 +320,7 @@ fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
             _ => "off".to_string(),
         },
         corner_radius: get_str_setting(&conn, "corner_radius", "0,0,0,0"),
+        filter_rules: get_str_setting(&conn, "filter_rules", "继续\n你好"),
         dock_mode: get_str_setting(&conn, "dock_mode", "terminal"),
         attach_side: get_str_setting(&conn, "attach_side", "right"),
         dock_width: get_i32_setting(&conn, "dock_width", 360),
@@ -337,6 +340,7 @@ fn set_prefs(
     font_size: String,
     glass: String,
     corner_radius: String,
+    filter_rules: String,
     mode: String,
     side: String,
     width: i32,
@@ -370,6 +374,7 @@ fn set_prefs(
         set_setting(&conn, "font_size", &font_size)?;
         set_setting(&conn, "glass", &glass)?;
         set_setting(&conn, "corner_radius", &corner_radius)?;
+        set_setting(&conn, "filter_rules", filter_rules.trim())?;
         set_setting(&conn, "dock_mode", &mode)?;
         set_setting(&conn, "attach_side", &side)?;
         set_setting(&conn, "dock_width", &width.to_string())?;
@@ -750,6 +755,27 @@ fn is_real_prompt(text: &str) -> bool {
     !noise_prefixes.iter().any(|prefix| t.starts_with(prefix))
 }
 
+/// 用户自定义过滤：整条提问（去掉首尾空白和末尾标点、忽略大小写）正好等于
+/// 某条规则时返回 true。规则按行分隔。用于过滤“继续”“你好”这类催状态的短消息。
+fn is_filtered(text: &str, rules: &str) -> bool {
+    let normalize = |s: &str| {
+        s.trim()
+            .trim_end_matches(|c: char| {
+                c.is_whitespace() || ",.。!！?？、;；:：…~ ".contains(c)
+            })
+            .trim()
+            .to_lowercase()
+    };
+    let t = normalize(text);
+    if t.is_empty() {
+        return false;
+    }
+    rules
+        .lines()
+        .map(normalize)
+        .any(|rule| !rule.is_empty() && rule == t)
+}
+
 /// 清掉提问里的图片噪音：去掉 `<image …></image>` 标签与 `[Image #N]` 占位。
 fn clean_prompt(text: &str) -> String {
     // 1) 去掉 <image …></image>（或自闭合 <image …>）
@@ -886,14 +912,26 @@ fn dedup_key(source: &str, uuid: Option<&str>, asked_at: &str, text: &str) -> St
 /// 聚焦的窗口里，所以当下前台即正确归属。**不再做会话黏定** —— 黏定会把一
 /// 个会话永久锁死在它第一次出现的窗口上，导致同一应用的多窗口分不开。
 fn store_question(app: &AppHandle, source: &str, parsed: ParsedQuestion) -> bool {
+    let Some(db) = app.try_state::<Db>() else {
+        return false;
+    };
+
+    // 命中用户过滤规则（“继续/你好”等催状态短消息）则直接跳过，不入库。
+    {
+        let Ok(conn) = db.0.lock() else {
+            return false;
+        };
+        let rules = get_str_setting(&conn, "filter_rules", "");
+        if is_filtered(&parsed.text, &rules) {
+            return false;
+        }
+    }
+
     let window_id = detect_front_terminal()
         .ok()
         .flatten()
         .map(|win| win.window_id.to_string());
 
-    let Some(db) = app.try_state::<Db>() else {
-        return false;
-    };
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let Ok(conn) = db.0.lock() else {
@@ -1087,6 +1125,18 @@ mod tests {
         assert!(!is_real_prompt(
             "The following is the Codex agent history whose request action you are assessing."
         ));
+    }
+
+    #[test]
+    fn filter_rules_match_whole_message_only() {
+        let rules = "继续\n你好\nok";
+        assert!(super::is_filtered("继续", rules));
+        assert!(super::is_filtered("继续。", rules)); // 末尾标点忽略
+        assert!(super::is_filtered("  你好  ", rules)); // 首尾空白忽略
+        assert!(super::is_filtered("OK", rules)); // 大小写忽略
+        assert!(!super::is_filtered("继续优化这个函数", rules)); // 不是整条匹配
+        assert!(!super::is_filtered("你好，帮我看下报错", rules));
+        assert!(!super::is_filtered("继续", "")); // 无规则不过滤
     }
 
     #[test]

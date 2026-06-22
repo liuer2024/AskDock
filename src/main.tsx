@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Check, Copy, Info, Palette, PanelRight, Settings, Type, X, Zap } from "lucide-react";
+import { Check, Copy, Filter, Info, Palette, PanelRight, Settings, Type, X, Zap } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -36,6 +36,7 @@ type Prefs = {
   font_size: string;
   glass: string;
   corner_radius: string;
+  filter_rules: string;
   dock_mode: string;
   attach_side: string;
   dock_width: number;
@@ -49,6 +50,7 @@ const DEFAULT_PREFS: Prefs = {
   font_size: "medium",
   glass: "off",
   corner_radius: "0,0,0,0",
+  filter_rules: "继续\n你好",
   dock_mode: "terminal",
   attach_side: "right",
   dock_width: 360,
@@ -427,6 +429,7 @@ function SettingsPage() {
           fontSize: next.font_size,
           glass: next.glass || "off",
           cornerRadius: next.corner_radius || "0,0,0,0",
+          filterRules: next.filter_rules ?? "",
           mode: next.dock_mode,
           side: next.attach_side,
           width: next.dock_width,
@@ -472,6 +475,9 @@ function SettingsPage() {
         </button>
         <button className={cat === "layout" ? "on" : ""} type="button" onClick={() => setCat("layout")}>
           <PanelRight size={16} /> <span>贴靠</span>
+        </button>
+        <button className={cat === "filter" ? "on" : ""} type="button" onClick={() => setCat("filter")}>
+          <Filter size={16} /> <span>过滤</span>
         </button>
         <button className={cat === "about" ? "on" : ""} type="button" onClick={() => setCat("about")}>
           <Info size={16} /> <span>关于</span>
@@ -593,6 +599,20 @@ function SettingsPage() {
                 )}
               </div>
             </div>
+          </>
+        )}
+
+        {cat === "filter" && (
+          <>
+            <div className="prefsGroupTitle">过滤规则</div>
+            <div className="prefsHint">每行一个词。抓到的提问如果整条正好等于某行（忽略大小写和末尾标点），就不收进列表。常用于「继续」「你好」这类只是催状态的短消息。</div>
+            <textarea
+              className="filterArea"
+              value={prefs.filter_rules ?? ""}
+              spellCheck={false}
+              placeholder={"继续\n你好\nok"}
+              onChange={(e) => update({ filter_rules: e.target.value })}
+            />
           </>
         )}
 
