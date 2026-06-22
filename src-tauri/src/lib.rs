@@ -47,6 +47,7 @@ struct Prefs {
     glass: String,
     corner_radius: String,
     filter_rules: String,
+    retention_days: i32,
     dock_mode: String,
     attach_side: String,
     dock_width: i32,
@@ -223,6 +224,7 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
           ('glass', 'off'),
           ('corner_radius', '0,0,0,0'),
           ('filter_rules', '继续' || char(10) || '你好'),
+          ('retention_days', '3'),
           ('dock_mode', 'terminal'),
           ('attach_side', 'right'),
           ('dock_width', '360'),
@@ -338,6 +340,7 @@ fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
         },
         corner_radius: get_str_setting(&conn, "corner_radius", "0,0,0,0"),
         filter_rules: get_str_setting(&conn, "filter_rules", "继续\n你好"),
+        retention_days: get_i32_setting(&conn, "retention_days", 3),
         dock_mode: get_str_setting(&conn, "dock_mode", "terminal"),
         attach_side: get_str_setting(&conn, "attach_side", "right"),
         dock_width: get_i32_setting(&conn, "dock_width", 360),
@@ -358,6 +361,7 @@ fn set_prefs(
     glass: String,
     corner_radius: String,
     filter_rules: String,
+    retention_days: i32,
     mode: String,
     side: String,
     width: i32,
@@ -392,11 +396,16 @@ fn set_prefs(
         set_setting(&conn, "glass", &glass)?;
         set_setting(&conn, "corner_radius", &corner_radius)?;
         set_setting(&conn, "filter_rules", filter_rules.trim())?;
+        set_setting(&conn, "retention_days", &retention_days.clamp(0, 365).to_string())?;
         set_setting(&conn, "dock_mode", &mode)?;
         set_setting(&conn, "attach_side", &side)?;
         set_setting(&conn, "dock_width", &width.to_string())?;
         set_setting(&conn, "dock_height", &height.to_string())?;
         set_setting(&conn, "follow_terminal", if follow { "1" } else { "0" })?;
+    }
+    // 改了保留天数 → 立即清理一次
+    if let Ok(conn) = db.0.lock() {
+        purge_cache(&app, &conn, retention_days.clamp(0, 365));
     }
     if let Some(window) = app.get_webview_window("main") {
         apply_glass(&window, &glass, radius_max(&corner_radius));
@@ -637,7 +646,19 @@ fn run_capture_loop(app: AppHandle) {
         }
     }
 
+    let mut purge_counter: u32 = 0;
     loop {
+        // 每 ~1 小时清理一次过期缓存（首轮也清）。
+        if purge_counter == 0 {
+            if let Some(db) = app.try_state::<Db>() {
+                if let Ok(conn) = db.0.lock() {
+                    let days = get_i32_setting(&conn, "retention_days", 3);
+                    purge_cache(&app, &conn, days);
+                }
+            }
+        }
+        purge_counter = (purge_counter + 1) % 4500; // 4500 * 800ms ≈ 1 小时
+
         let mut captured_any = false;
         for (root, source) in &sources {
             let mut files = Vec::new();
@@ -973,6 +994,44 @@ fn dedup_key(source: &str, uuid: Option<&str>, asked_at: &str, text: &str) -> St
             let mut hasher = DefaultHasher::new();
             (source, asked_at, text).hash(&mut hasher);
             format!("{source}:h{:x}", hasher.finish())
+        }
+    }
+}
+
+/// 缓存清理：删掉超过保留天数的会话记录，并清掉 images 目录里没人引用的孤儿图片。
+/// retention_days <= 0 表示永久保留（只清孤儿图片）。
+fn purge_cache(app: &AppHandle, conn: &Connection, retention_days: i32) {
+    if retention_days > 0 {
+        let cutoff = (Utc::now() - chrono::Duration::days(retention_days as i64)).to_rfc3339();
+        let _ = conn.execute(
+            "DELETE FROM questions WHERE datetime(created_at) < datetime(?1)",
+            params![cutoff],
+        );
+    }
+
+    // 删掉 images 目录里不再被任何会话引用的图片文件（含用户手动删/清空留下的）。
+    let Ok(dir) = app.path().app_data_dir().map(|d| d.join("images")) else {
+        return;
+    };
+    let used: std::collections::HashSet<String> = {
+        let mut set = std::collections::HashSet::new();
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT image_path FROM questions WHERE image_path IS NOT NULL")
+        {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for path in rows.flatten() {
+                    set.insert(path);
+                }
+            }
+        }
+        set
+    };
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && !used.contains(&path.to_string_lossy().to_string()) {
+                let _ = fs::remove_file(&path);
+            }
         }
     }
 }

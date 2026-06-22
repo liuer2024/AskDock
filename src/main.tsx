@@ -44,6 +44,7 @@ type Prefs = {
   glass: string;
   corner_radius: string;
   filter_rules: string;
+  retention_days: number;
   dock_mode: string;
   attach_side: string;
   dock_width: number;
@@ -58,6 +59,7 @@ const DEFAULT_PREFS: Prefs = {
   glass: "off",
   corner_radius: "0,0,0,0",
   filter_rules: "继续\n你好",
+  retention_days: 3,
   dock_mode: "terminal",
   attach_side: "right",
   dock_width: 360,
@@ -523,6 +525,7 @@ function SettingsPage() {
           glass: next.glass || "off",
           cornerRadius: next.corner_radius || "0,0,0,0",
           filterRules: next.filter_rules ?? "",
+          retentionDays: Number(next.retention_days) || 0,
           mode: next.dock_mode,
           side: next.attach_side,
           width: next.dock_width,
@@ -706,6 +709,25 @@ function SettingsPage() {
               placeholder={"继续\n你好\nok"}
               onChange={(e) => update({ filter_rules: e.target.value })}
             />
+
+            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>缓存清理</div>
+            <div className="prefsHint">超过保留天数的会话记录和图片会自动清理。0 = 永久保留。</div>
+            <div className="prefsCard">
+              <div className="prefsRow">
+                <span>保留天数</span>
+                <span className="numField">
+                  <input
+                    type="number"
+                    min={0}
+                    max={365}
+                    value={prefs.retention_days}
+                    onChange={(e) => update({ retention_days: Number(e.target.value) })}
+                    onBlur={() => update({ retention_days: Math.max(0, Math.min(365, Number(prefs.retention_days) || 0)) })}
+                  />
+                  <i>天</i>
+                </span>
+              </div>
+            </div>
           </>
         )}
 
