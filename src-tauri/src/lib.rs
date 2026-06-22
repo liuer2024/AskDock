@@ -484,11 +484,29 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let theme = {
+    let (theme, font_face, font_size, glass) = {
         let db = app.state::<Db>();
         let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
-        get_str_setting(&conn, "theme", "linen")
+        (
+            get_str_setting(&conn, "theme", "linen"),
+            get_str_setting(&conn, "font_face", "system"),
+            get_str_setting(&conn, "font_size", "medium"),
+            get_str_setting(&conn, "glass", "off"),
+        )
     };
+    // 绘制前就把真实外观设上去（data-* + html 底色），并注入全局给 React 读初始值，
+    // 避免首帧按默认(亚麻)画一帧再变回真实主题的闪动。
+    let bg = if glass == "off" {
+        theme_hex(&theme).to_string()
+    } else {
+        "transparent".to_string()
+    };
+    let init = format!(
+        "window.__ASKDOCK_INIT__={{theme:'{theme}',font_face:'{font_face}',font_size:'{font_size}',glass:'{glass}'}};\
+         var r=document.documentElement;r.setAttribute('data-theme','{theme}');\
+         r.setAttribute('data-face','{font_face}');r.setAttribute('data-size','{font_size}');\
+         r.setAttribute('data-glass','{glass}');r.style.background='{bg}';"
+    );
     let settings = tauri::WebviewWindowBuilder::new(
         &app,
         "settings",
@@ -500,10 +518,7 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     .resizable(true)
     .visible(false)
     .background_color(theme_bg(&theme))
-    .initialization_script(format!(
-        "document.documentElement.style.background='{}';",
-        theme_hex(&theme)
-    ))
+    .initialization_script(init)
     .build()
     .map_err(|error| error.to_string())?;
 

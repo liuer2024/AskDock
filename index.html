@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AskDock</title>
     <style>html, body { margin: 0; background: transparent; }</style>
+    <script>
+      // 绘制前从缓存套上外观，避免主窗口首帧闪默认主题。(设置窗口走原生注入)
+      try {
+        var a = JSON.parse(localStorage.getItem("askdock.appearance") || "{}");
+        var r = document.documentElement;
+        if (a.theme) r.setAttribute("data-theme", a.theme);
+        if (a.face) r.setAttribute("data-face", a.face);
+        if (a.size) r.setAttribute("data-size", a.size);
+        if (a.glass) r.setAttribute("data-glass", a.glass);
+        if (a.bg) r.style.background = a.bg;
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

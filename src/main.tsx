@@ -76,6 +76,37 @@ const THEMES: { id: string; name: string; bg: string; a: string; b: string }[] =
   { id: "slate", name: "石板", bg: "#f1f3f6", a: "#0f9b69", b: "#c2562f" }
 ];
 
+const APPEARANCE_KEY = "askdock.appearance";
+
+// 首帧用的外观：优先后端注入(设置窗口)，否则用 localStorage 缓存(主窗口)。
+// 让 React 第一次渲染就拿到正确主题，避免按 DEFAULT_PREFS(亚麻) 先画一帧再变回去的闪动。
+function initialAppearance(): Partial<Prefs> {
+  try {
+    const injected = (window as unknown as { __ASKDOCK_INIT__?: Partial<Prefs> }).__ASKDOCK_INIT__;
+    if (injected && injected.theme) {
+      return {
+        theme: injected.theme,
+        font_face: injected.font_face,
+        font_size: injected.font_size,
+        glass: injected.glass
+      };
+    }
+    const a = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || "{}");
+    const out: Partial<Prefs> = {};
+    if (a.theme) out.theme = a.theme;
+    if (a.face) out.font_face = a.face;
+    if (a.size) out.font_size = a.size;
+    if (a.glass) out.glass = a.glass;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function initialPrefs(): Prefs {
+  return { ...DEFAULT_PREFS, ...initialAppearance() };
+}
+
 const browserKey = "askdock.browser.questions";
 const BROWSER_WINDOW_ID = "browser-preview";
 const isTauriRuntime = () => typeof window !== "undefined" && typeof window.__TAURI_INTERNALS__?.invoke === "function";
@@ -190,6 +221,18 @@ function useApplyAppearance(prefs: Prefs) {
     root.setAttribute("data-glass", prefs.glass || "off");
     const [tl, tr, bl, br] = (prefs.corner_radius || "0,0,0,0").split(",").map((n) => Number(n) || 0);
     root.style.setProperty("--radius", `${tl}px ${tr}px ${br}px ${bl}px`); // CSS 顺序: 左上 右上 右下 左下
+    // 缓存外观，供下次开窗在绘制前(index.html 内联脚本)套上，避免首帧闪默认主题。
+    try {
+      const glassOn = prefs.glass && prefs.glass !== "off";
+      const bg = glassOn ? "transparent" : THEMES.find((t) => t.id === prefs.theme)?.bg || "";
+      localStorage.setItem(
+        APPEARANCE_KEY,
+        JSON.stringify({ theme: prefs.theme, face: prefs.font_face, size: prefs.font_size, glass: prefs.glass, bg })
+      );
+      root.style.background = bg;
+    } catch {
+      /* ignore */
+    }
   }, [prefs.theme, prefs.font_face, prefs.font_size, prefs.glass, prefs.corner_radius]);
 }
 
@@ -215,7 +258,7 @@ function Dock() {
   const [questions, setQuestions] = React.useState<CapturedQuestion[]>([]);
   const [message, setMessage] = React.useState("");
   const [freeMode, setFreeMode] = React.useState(false);
-  const [prefs, setPrefs] = React.useState<Prefs>(DEFAULT_PREFS);
+  const [prefs, setPrefs] = React.useState<Prefs>(initialPrefs);
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
   const [lightbox, setLightbox] = React.useState<string | null>(null);
 
@@ -497,7 +540,7 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
 /* ===================== 设置窗口 ===================== */
 
 function SettingsPage() {
-  const [prefs, setPrefs] = React.useState<Prefs>(DEFAULT_PREFS);
+  const [prefs, setPrefs] = React.useState<Prefs>(initialPrefs);
   const [cat, setCat] = React.useState("appearance");
   const saveTimer = React.useRef<number | undefined>(undefined);
 
