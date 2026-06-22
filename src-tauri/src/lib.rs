@@ -438,6 +438,18 @@ fn theme_bg(theme: &str) -> tauri::window::Color {
     tauri::window::Color(r, g, b, 255)
 }
 
+/// 主题表面色的十六进制（用于在内容绘制前注入 html 背景，盖住 webview 白底）。
+fn theme_hex(theme: &str) -> &'static str {
+    match theme {
+        "midnight" => "#0e1014",
+        "graphite" => "#161618",
+        "ember" => "#150f0b",
+        "indigo" => "#13152b",
+        "slate" => "#f1f3f6",
+        _ => "#f4f0e7", // linen / 默认
+    }
+}
+
 /// 从 "tl,tr,bl,br" 取最大圆角(原生 vibrancy 只能整体一个半径，取最大值近似)。
 fn radius_max(corner_radius: &str) -> f64 {
     corner_radius
@@ -488,6 +500,10 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     .resizable(true)
     .visible(false)
     .background_color(theme_bg(&theme))
+    .initialization_script(format!(
+        "document.documentElement.style.background='{}';",
+        theme_hex(&theme)
+    ))
     .build()
     .map_err(|error| error.to_string())?;
 
