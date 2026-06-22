@@ -76,6 +76,9 @@ struct ParsedQuestion {
     session_id: Option<String>,
 }
 
+/// 纯图片消息的占位文本（清理后无文字时用它，避免丢掉这条）。
+const IMAGE_MARKER: &str = "🖼 图片";
+
 const TERMINAL_APP_NAMES: &[&str] = &[
     "Terminal",
     "iTerm",
@@ -836,12 +839,20 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
         return None;
     }
     let content = v.get("message").and_then(|m| m.get("content"))?;
+    let has_image = content.as_array().map_or(false, |arr| {
+        arr.iter()
+            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("image"))
+    });
     let raw = match content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(_) => join_text_blocks(content, "text", "type"),
         _ => return None,
     };
-    let text = clean_prompt(&raw).trim().to_string();
+    let mut text = clean_prompt(&raw).trim().to_string();
+    // 纯图片消息（清理后为空但确实带图）→ 保留为「图片」标记，不丢弃。
+    if text.is_empty() && has_image {
+        text = IMAGE_MARKER.to_string();
+    }
     if !is_real_prompt(&text) {
         return None;
     }
@@ -876,7 +887,19 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
     }
     let content = payload.get("content")?;
     let raw = join_text_blocks(content, "text", "type");
-    let text = clean_prompt(&raw).trim().to_string();
+    let has_image = raw.contains("<image")
+        || content.as_array().map_or(false, |arr| {
+            arr.iter().any(|b| {
+                matches!(
+                    b.get("type").and_then(|t| t.as_str()),
+                    Some("input_image") | Some("image")
+                )
+            })
+        });
+    let mut text = clean_prompt(&raw).trim().to_string();
+    if text.is_empty() && has_image {
+        text = IMAGE_MARKER.to_string();
+    }
     if !is_real_prompt(&text) {
         return None;
     }
