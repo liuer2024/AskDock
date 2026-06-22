@@ -114,6 +114,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_position(PhysicalPosition::new(80, 80))?;
                 window.set_size(PhysicalSize::new(360, 620))?;
+                // webview 透明，消掉内容绘制前那一瞬的默认底色（橙黄闪屏）
+                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 let (glass_mode, radius) = {
                     let db = app.state::<Db>();
                     let conn = db.0.lock().unwrap();
@@ -461,6 +463,7 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     .min_inner_size(620.0, 440.0)
     .resizable(true)
     .visible(false)
+    .background_color(tauri::window::Color(244, 240, 231, 255))
     .build()
     .map_err(|error| error.to_string())?;
 
