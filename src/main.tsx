@@ -374,8 +374,9 @@ function Dock() {
     const imageOnly = item.image_path && (!item.text || item.text === IMAGE_MARKER);
     try {
       if (imageOnly) {
-        // 纯图片条目 → 复制图片本身到剪贴板
-        const res = await fetch(imageSrc(item.image_path!));
+        // 纯图片条目 → 复制图片本身到剪贴板（多张时取第一张）
+        const first = item.image_path!.split("\n").filter(Boolean)[0];
+        const res = await fetch(imageSrc(first));
         const blob = await res.blob();
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
       } else {
@@ -446,7 +447,18 @@ function Dock() {
                 </div>
                 {q.text && q.text !== IMAGE_MARKER ? <div className="body">{q.text}</div> : null}
                 {q.image_path ? (
-                  <img className="qImg" src={imageSrc(q.image_path)} alt="图片" loading="lazy" onClick={() => setLightbox(imageSrc(q.image_path!))} />
+                  <div className="qImgs">
+                    {q.image_path.split("\n").filter(Boolean).map((p, i) => (
+                      <img
+                        key={i}
+                        className="qImg"
+                        src={imageSrc(p)}
+                        alt="图片"
+                        loading="lazy"
+                        onClick={() => setLightbox(imageSrc(p))}
+                      />
+                    ))}
+                  </div>
                 ) : q.text === IMAGE_MARKER ? (
                   <div className="body muted">{IMAGE_MARKER}</div>
                 ) : null}

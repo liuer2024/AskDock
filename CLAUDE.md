@@ -122,7 +122,11 @@ created in `init_database`. Two tables: `questions` and `settings` (key/value).
 
 - `questions` columns: `id`, `window_id` (CGWindowID as text, may be NULL if no terminal
   was frontmost at capture), `source` (`claude`|`codex`), `session_id`, `cwd`, `text`,
-  `asked_at` (transcript timestamp), `created_at` (capture time), `dedup_key` UNIQUE.
+  `asked_at` (transcript timestamp), `created_at` (capture time), `dedup_key` UNIQUE,
+  `image_path`. **`image_path` is newline-joined** — one message can carry several images
+  (`parse_*` collect all blocks into `ParsedQuestion.images`; `store_question` persists each
+  and joins the paths with `\n`). The frontend splits on `\n` and renders one `<img>` each;
+  `purge_cache`'s orphan sweep splits too. A single-path value is just the 1-element case.
 - `get_window_questions(window_id)` returns that window's rows, newest `asked_at` first.
 
 > Caveat: CGWindowID distinguishes separate **windows**, not **tabs** within one Ghostty

@@ -83,7 +83,7 @@ struct ParsedQuestion {
     asked_at: String,
     cwd: Option<String>,
     session_id: Option<String>,
-    image: Option<CapturedImage>,
+    images: Vec<CapturedImage>,
 }
 
 /// 纯图片消息的占位文本（清理后无文字时用它，避免丢掉这条）。
@@ -932,33 +932,38 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
         return None;
     }
     let content = v.get("message").and_then(|m| m.get("content"))?;
-    // Claude 的图片是内嵌 base64 块
-    let image = content.as_array().and_then(|arr| {
-        arr.iter().find_map(|b| {
-            if b.get("type").and_then(|t| t.as_str()) != Some("image") {
-                return None;
-            }
-            let src = b.get("source")?;
-            let data = src.get("data").and_then(|d| d.as_str())?;
-            let media = src
-                .get("media_type")
-                .and_then(|m| m.as_str())
-                .unwrap_or("image/png");
-            let ext = media.rsplit('/').next().unwrap_or("png");
-            let ext = if ext == "jpeg" { "jpg" } else { ext };
-            Some(CapturedImage::Base64 {
-                ext: ext.to_string(),
-                data: data.to_string(),
-            })
+    // Claude 的图片是内嵌 base64 块；一条消息可能有多张，全部收集。
+    let images: Vec<CapturedImage> = content
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| {
+                    if b.get("type").and_then(|t| t.as_str()) != Some("image") {
+                        return None;
+                    }
+                    let src = b.get("source")?;
+                    let data = src.get("data").and_then(|d| d.as_str())?;
+                    let media = src
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png");
+                    let ext = media.rsplit('/').next().unwrap_or("png");
+                    let ext = if ext == "jpeg" { "jpg" } else { ext };
+                    Some(CapturedImage::Base64 {
+                        ext: ext.to_string(),
+                        data: data.to_string(),
+                    })
+                })
+                .collect()
         })
-    });
+        .unwrap_or_default();
     let raw = match content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(_) => join_text_blocks(content, "text", "type"),
         _ => return None,
     };
     let mut text = clean_prompt(&raw).trim().to_string();
-    if text.is_empty() && image.is_some() {
+    if text.is_empty() && !images.is_empty() {
         text = IMAGE_MARKER.to_string();
     }
     if !is_real_prompt(&text) {
@@ -979,7 +984,7 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
             .get("sessionId")
             .and_then(|s| s.as_str())
             .map(|s| s.to_string()),
-        image,
+        images,
     })
 }
 
@@ -996,9 +1001,12 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
     }
     let content = payload.get("content")?;
     let raw = join_text_blocks(content, "text", "type");
-    // Codex 把图片写成 <image … path="…"> ；抽出路径，抓到时复制一份持久化
-    let image = extract_codex_image_path(&raw).map(CapturedImage::Path);
-    let has_image = image.is_some()
+    // Codex 把图片写成 <image … path="…"> ；一条消息可能有多张，抽出全部路径复制持久化
+    let images: Vec<CapturedImage> = extract_codex_image_paths(&raw)
+        .into_iter()
+        .map(CapturedImage::Path)
+        .collect();
+    let has_image = !images.is_empty()
         || raw.contains("<image")
         || content.as_array().map_or(false, |arr| {
             arr.iter().any(|b| {
@@ -1026,23 +1034,31 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
         asked_at,
         cwd: None,
         session_id: session_id.map(|s| s.to_string()),
-        image,
+        images,
     })
 }
 
-/// 从 Codex 的 `<image … path="…">` 里抽出第一个文件路径。
-fn extract_codex_image_path(raw: &str) -> Option<String> {
-    let start = raw.find("<image")?;
-    let after = &raw[start..];
-    let p = after.find("path=\"")? + "path=\"".len();
-    let rest = &after[p..];
-    let end = rest.find('"')?;
-    let path = &rest[..end];
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
+/// 从 Codex 的 `<image … path="…">` 里抽出所有文件路径（一条消息可能多张）。
+fn extract_codex_image_paths(raw: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find("<image") {
+        let after = &rest[start + "<image".len()..];
+        // 该 <image 标签的结束位置，路径只在标签内部找，避免跨标签误抓
+        let tag_end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..tag_end];
+        if let Some(p) = tag.find("path=\"") {
+            let val = &tag[p + "path=\"".len()..];
+            if let Some(end) = val.find('"') {
+                let path = &val[..end];
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        rest = &after[tag_end..];
     }
+    paths
 }
 
 fn dedup_key(source: &str, uuid: Option<&str>, asked_at: &str, text: &str) -> String {
@@ -1077,8 +1093,11 @@ fn purge_cache(app: &AppHandle, conn: &Connection, retention_days: i32) {
             conn.prepare("SELECT image_path FROM questions WHERE image_path IS NOT NULL")
         {
             if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                for path in rows.flatten() {
-                    set.insert(path);
+                for joined in rows.flatten() {
+                    // image_path 可能是多张图换行连起来的，逐一登记。
+                    for path in joined.split('\n').filter(|p| !p.is_empty()) {
+                        set.insert(path.to_string());
+                    }
                 }
             }
         }
@@ -1121,8 +1140,17 @@ fn store_question(app: &AppHandle, source: &str, parsed: ParsedQuestion) -> bool
         .flatten()
         .map(|win| win.window_id.to_string());
 
-    // 把附带的图片持久化到 AskDock 自己的目录，存它的路径。
-    let image_path = parsed.image.as_ref().and_then(|img| persist_image(app, img));
+    // 把附带的图片（可能多张）持久化到 AskDock 自己的目录，多张路径用换行连起来存。
+    let paths: Vec<String> = parsed
+        .images
+        .iter()
+        .filter_map(|img| persist_image(app, img))
+        .collect();
+    let image_path = if paths.is_empty() {
+        None
+    } else {
+        Some(paths.join("\n"))
+    };
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -1369,5 +1397,20 @@ mod tests {
         assert_eq!(super::clean_prompt(raw).trim(), "这页面太粗糙了，设计一下。");
         // 纯图片消息清理后为空 → 不算有效提问
         assert!(super::clean_prompt("<image path=\"/tmp/a.png\"></image>").trim().is_empty());
+    }
+
+    #[test]
+    fn extracts_all_codex_image_paths() {
+        // 一条消息里多张图：全部抽出，且路径只在各自标签内取。
+        let raw = "<image name=[Image #1] path=\"/tmp/a.png\"></image>看下\
+                   <image name=[Image #2] path=\"/tmp/b.jpg\"></image>这两张";
+        assert_eq!(
+            super::extract_codex_image_paths(raw),
+            vec!["/tmp/a.png".to_string(), "/tmp/b.jpg".to_string()]
+        );
+        // 没有图片时返回空。
+        assert!(super::extract_codex_image_paths("纯文字").is_empty());
+        // 空 path 跳过。
+        assert!(super::extract_codex_image_paths("<image path=\"\">").is_empty());
     }
 }
