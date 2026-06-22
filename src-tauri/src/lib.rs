@@ -1,3 +1,4 @@
+use base64::Engine;
 use chrono::Utc;
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
@@ -26,6 +27,7 @@ struct CapturedQuestion {
     cwd: Option<String>,
     text: String,
     asked_at: String,
+    image_path: Option<String>,
 }
 
 /// 前台窗口探测结果。window_id 为 None 表示前台不是终端。
@@ -67,6 +69,12 @@ struct Rect {
     height: i32,
 }
 
+/// 提问里附带的图片来源：Claude 是内嵌 base64，Codex 是临时文件路径。
+enum CapturedImage {
+    Base64 { ext: String, data: String },
+    Path(String),
+}
+
 /// 从会话文件里解析出的一条原始提问（未归类）。
 struct ParsedQuestion {
     dedup_key: String,
@@ -74,6 +82,7 @@ struct ParsedQuestion {
     asked_at: String,
     cwd: Option<String>,
     session_id: Option<String>,
+    image: Option<CapturedImage>,
 }
 
 /// 纯图片消息的占位文本（清理后无文字时用它，避免丢掉这条）。
@@ -196,7 +205,8 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
           text TEXT NOT NULL,
           asked_at TEXT NOT NULL,
           created_at TEXT NOT NULL,
-          dedup_key TEXT NOT NULL UNIQUE
+          dedup_key TEXT NOT NULL UNIQUE,
+          image_path TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_questions_window ON questions(window_id);
@@ -223,6 +233,9 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
     )
     .map_err(|error| tauri::Error::Anyhow(error.into()))?;
 
+    // 兼容旧库：补上 image_path 列（已存在时忽略报错）。
+    let _ = conn.execute("ALTER TABLE questions ADD COLUMN image_path TEXT", []);
+
     Ok(conn)
 }
 
@@ -235,10 +248,11 @@ fn map_question(row: &Row) -> rusqlite::Result<CapturedQuestion> {
         cwd: row.get(4)?,
         text: row.get(5)?,
         asked_at: row.get(6)?,
+        image_path: row.get(7)?,
     })
 }
 
-const QUESTION_COLUMNS: &str = "id, window_id, source, session_id, cwd, text, asked_at";
+const QUESTION_COLUMNS: &str = "id, window_id, source, session_id, cwd, text, asked_at, image_path";
 
 /// 前端轮询：探测当前前台终端窗口，按需贴靠，并记下它供抓取时归类用。
 #[tauri::command]
@@ -839,9 +853,25 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
         return None;
     }
     let content = v.get("message").and_then(|m| m.get("content"))?;
-    let has_image = content.as_array().map_or(false, |arr| {
-        arr.iter()
-            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("image"))
+    // Claude 的图片是内嵌 base64 块
+    let image = content.as_array().and_then(|arr| {
+        arr.iter().find_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) != Some("image") {
+                return None;
+            }
+            let src = b.get("source")?;
+            let data = src.get("data").and_then(|d| d.as_str())?;
+            let media = src
+                .get("media_type")
+                .and_then(|m| m.as_str())
+                .unwrap_or("image/png");
+            let ext = media.rsplit('/').next().unwrap_or("png");
+            let ext = if ext == "jpeg" { "jpg" } else { ext };
+            Some(CapturedImage::Base64 {
+                ext: ext.to_string(),
+                data: data.to_string(),
+            })
+        })
     });
     let raw = match content {
         serde_json::Value::String(s) => s.clone(),
@@ -849,8 +879,7 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
         _ => return None,
     };
     let mut text = clean_prompt(&raw).trim().to_string();
-    // 纯图片消息（清理后为空但确实带图）→ 保留为「图片」标记，不丢弃。
-    if text.is_empty() && has_image {
+    if text.is_empty() && image.is_some() {
         text = IMAGE_MARKER.to_string();
     }
     if !is_real_prompt(&text) {
@@ -871,6 +900,7 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
             .get("sessionId")
             .and_then(|s| s.as_str())
             .map(|s| s.to_string()),
+        image,
     })
 }
 
@@ -887,7 +917,10 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
     }
     let content = payload.get("content")?;
     let raw = join_text_blocks(content, "text", "type");
-    let has_image = raw.contains("<image")
+    // Codex 把图片写成 <image … path="…"> ；抽出路径，抓到时复制一份持久化
+    let image = extract_codex_image_path(&raw).map(CapturedImage::Path);
+    let has_image = image.is_some()
+        || raw.contains("<image")
         || content.as_array().map_or(false, |arr| {
             arr.iter().any(|b| {
                 matches!(
@@ -914,7 +947,23 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
         asked_at,
         cwd: None,
         session_id: session_id.map(|s| s.to_string()),
+        image,
     })
+}
+
+/// 从 Codex 的 `<image … path="…">` 里抽出第一个文件路径。
+fn extract_codex_image_path(raw: &str) -> Option<String> {
+    let start = raw.find("<image")?;
+    let after = &raw[start..];
+    let p = after.find("path=\"")? + "path=\"".len();
+    let rest = &after[p..];
+    let end = rest.find('"')?;
+    let path = &rest[..end];
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
 }
 
 fn dedup_key(source: &str, uuid: Option<&str>, asked_at: &str, text: &str) -> String {
@@ -955,6 +1004,9 @@ fn store_question(app: &AppHandle, source: &str, parsed: ParsedQuestion) -> bool
         .flatten()
         .map(|win| win.window_id.to_string());
 
+    // 把附带的图片持久化到 AskDock 自己的目录，存它的路径。
+    let image_path = parsed.image.as_ref().and_then(|img| persist_image(app, img));
+
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let Ok(conn) = db.0.lock() else {
@@ -962,8 +1014,8 @@ fn store_question(app: &AppHandle, source: &str, parsed: ParsedQuestion) -> bool
     };
     conn.execute(
         "INSERT OR IGNORE INTO questions
-           (id, window_id, source, session_id, cwd, text, asked_at, created_at, dedup_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+           (id, window_id, source, session_id, cwd, text, asked_at, created_at, dedup_key, image_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
             window_id,
@@ -973,11 +1025,43 @@ fn store_question(app: &AppHandle, source: &str, parsed: ParsedQuestion) -> bool
             parsed.text,
             parsed.asked_at,
             now,
-            parsed.dedup_key
+            parsed.dedup_key,
+            image_path
         ],
     )
     .map(|changed| changed > 0)
     .unwrap_or(false)
+}
+
+/// 把抓到的图片落到 `app_data_dir/images/<uuid>.<ext>`，返回保存后的绝对路径。
+/// Claude 是内嵌 base64(解码写入)；Codex 是临时文件路径(复制一份)。
+fn persist_image(app: &AppHandle, image: &CapturedImage) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?.join("images");
+    fs::create_dir_all(&dir).ok()?;
+    let id = Uuid::new_v4().to_string();
+    match image {
+        CapturedImage::Base64 { ext, data } => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data.as_bytes())
+                .ok()?;
+            let path = dir.join(format!("{id}.{ext}"));
+            fs::write(&path, bytes).ok()?;
+            Some(path.to_string_lossy().to_string())
+        }
+        CapturedImage::Path(src) => {
+            let src_path = Path::new(src);
+            if !src_path.exists() {
+                return None;
+            }
+            let ext = src_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png");
+            let path = dir.join(format!("{id}.{ext}"));
+            fs::copy(src_path, &path).ok()?;
+            Some(path.to_string_lossy().to_string())
+        }
+    }
 }
 
 /// 用 Core Graphics 的窗口列表找出当前最前的普通窗口。

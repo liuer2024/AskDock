@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Check, Copy, Filter, Info, Palette, PanelRight, Settings, Type, X, Zap } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
@@ -22,7 +22,14 @@ type CapturedQuestion = {
   cwd: string | null;
   text: string;
   asked_at: string;
+  image_path: string | null;
 };
+
+const IMAGE_MARKER = "🖼 图片";
+
+function imageSrc(path: string) {
+  return isTauriRuntime() ? convertFileSrc(path) : path;
+}
 
 type FrontStatus = {
   window_id: string | null;
@@ -129,7 +136,7 @@ function readBrowserQuestions(): CapturedQuestion[] {
   }
   const now = Date.now();
   const mk = (id: string, source: string, text: string, ms: number): CapturedQuestion => ({
-    id, window_id: BROWSER_WINDOW_ID, source, session_id: null, cwd: null, text, asked_at: new Date(now - ms).toISOString()
+    id, window_id: BROWSER_WINDOW_ID, source, session_id: null, cwd: null, text, asked_at: new Date(now - ms).toISOString(), image_path: null
   });
   const sample: CapturedQuestion[] = [
     mk("1", "codex", "你开一个新的分支，将这些问题，用去控件化处理一下。", 2 * 60000),
@@ -208,6 +215,7 @@ function Dock() {
   const [freeMode, setFreeMode] = React.useState(false);
   const [prefs, setPrefs] = React.useState<Prefs>(DEFAULT_PREFS);
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
+  const [lightbox, setLightbox] = React.useState<string | null>(null);
 
   const windowIdRef = React.useRef<string | null>(null);
   windowIdRef.current = windowId;
@@ -317,8 +325,20 @@ function Dock() {
   }
 
   const copyTimer = React.useRef<number | undefined>(undefined);
-  function copy(item: CapturedQuestion) {
-    navigator.clipboard?.writeText(item.text).catch(() => undefined);
+  async function copy(item: CapturedQuestion) {
+    const imageOnly = item.image_path && (!item.text || item.text === IMAGE_MARKER);
+    try {
+      if (imageOnly) {
+        // 纯图片条目 → 复制图片本身到剪贴板
+        const res = await fetch(imageSrc(item.image_path!));
+        const blob = await res.blob();
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      } else {
+        await navigator.clipboard.writeText(item.text);
+      }
+    } catch {
+      navigator.clipboard?.writeText(item.text).catch(() => undefined);
+    }
     setCopiedId(item.id);
     window.clearTimeout(copyTimer.current);
     copyTimer.current = window.setTimeout(() => setCopiedId(null), 1400);
@@ -379,7 +399,12 @@ function Dock() {
                   <span className="dot" />
                   <span>{timeLabel(q.asked_at)}</span>
                 </div>
-                <div className="body">{q.text}</div>
+                {q.text && q.text !== IMAGE_MARKER ? <div className="body">{q.text}</div> : null}
+                {q.image_path ? (
+                  <img className="qImg" src={imageSrc(q.image_path)} alt="图片" loading="lazy" onClick={() => setLightbox(imageSrc(q.image_path!))} />
+                ) : q.text === IMAGE_MARKER ? (
+                  <div className="body muted">{IMAGE_MARKER}</div>
+                ) : null}
               </article>
             </React.Fragment>
           ))
@@ -395,6 +420,12 @@ function Dock() {
           <Settings size={14} /> <span>设置</span>
         </button>
       </footer>
+
+      {lightbox ? (
+        <div className="lightbox" onClick={() => setLightbox(null)}>
+          <img src={lightbox} alt="图片" />
+        </div>
+      ) : null}
     </main>
   );
 }
