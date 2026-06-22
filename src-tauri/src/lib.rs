@@ -114,16 +114,22 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_position(PhysicalPosition::new(80, 80))?;
                 window.set_size(PhysicalSize::new(360, 620))?;
-                // webview 透明，消掉内容绘制前那一瞬的默认底色（橙黄闪屏）
-                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
-                let (glass_mode, radius) = {
+                let (theme, glass_mode, radius) = {
                     let db = app.state::<Db>();
                     let conn = db.0.lock().unwrap();
                     (
+                        get_str_setting(&conn, "theme", "linen"),
                         get_str_setting(&conn, "glass", "off"),
                         radius_max(&get_str_setting(&conn, "corner_radius", "0,0,0,0")),
                     )
                 };
+                // 初始背景按主题色（开玻璃时用透明让 vibrancy 透出），消掉加载色变闪屏。
+                let bg = if glass_mode == "off" {
+                    theme_bg(&theme)
+                } else {
+                    tauri::window::Color(0, 0, 0, 0)
+                };
+                let _ = window.set_background_color(Some(bg));
                 apply_glass(&window, &glass_mode, radius);
                 window.show()?;
                 window.set_focus()?;
@@ -419,6 +425,19 @@ fn set_prefs(
 }
 
 /// 给窗口加/去 macOS 毛玻璃(NSVisualEffectView)。需要窗口透明 + CSS 半透明背景才看得到。
+/// 主题对应的表面底色（= CSS --bg），用作窗口初始背景，避免加载时色变闪屏。
+fn theme_bg(theme: &str) -> tauri::window::Color {
+    let (r, g, b) = match theme {
+        "midnight" => (14, 16, 20),
+        "graphite" => (22, 22, 24),
+        "ember" => (21, 15, 11),
+        "indigo" => (19, 21, 43),
+        "slate" => (241, 243, 246),
+        _ => (244, 240, 231), // linen / 默认
+    };
+    tauri::window::Color(r, g, b, 255)
+}
+
 /// 从 "tl,tr,bl,br" 取最大圆角(原生 vibrancy 只能整体一个半径，取最大值近似)。
 fn radius_max(corner_radius: &str) -> f64 {
     corner_radius
@@ -453,6 +472,11 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
+    let theme = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
+        get_str_setting(&conn, "theme", "linen")
+    };
     let settings = tauri::WebviewWindowBuilder::new(
         &app,
         "settings",
@@ -463,7 +487,7 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     .min_inner_size(620.0, 440.0)
     .resizable(true)
     .visible(false)
-    .background_color(tauri::window::Color(244, 240, 231, 255))
+    .background_color(theme_bg(&theme))
     .build()
     .map_err(|error| error.to_string())?;
 
