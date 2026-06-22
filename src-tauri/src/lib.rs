@@ -678,8 +678,47 @@ fn is_real_prompt(text: &str) -> bool {
         "[Image: source:",
         "[Request interrupted",
         "Caveat:",
+        // Codex 注入的“代理历史/审查”合成消息（里面含工具与助手内容，不是用户提问）
+        "The following is the Codex agent history",
     ];
     !noise_prefixes.iter().any(|prefix| t.starts_with(prefix))
+}
+
+/// 清掉提问里的图片噪音：去掉 `<image …></image>` 标签与 `[Image #N]` 占位。
+fn clean_prompt(text: &str) -> String {
+    // 1) 去掉 <image …></image>（或自闭合 <image …>）
+    let mut stage1 = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<image") {
+        stage1.push_str(&rest[..start]);
+        let after = &rest[start..];
+        rest = if let Some(end) = after.find("</image>") {
+            &after[end + "</image>".len()..]
+        } else if let Some(end) = after.find('>') {
+            &after[end + 1..]
+        } else {
+            ""
+        };
+    }
+    stage1.push_str(rest);
+
+    // 2) 去掉 [Image #N] 占位标记
+    let mut out = String::with_capacity(stage1.len());
+    let mut rest = stage1.as_str();
+    while let Some(start) = rest.find("[Image #") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        rest = match after.find(']') {
+            Some(end) => &after[end + 1..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    // 去掉清理后残留在开头的分隔标点/空白（如 "[Image #1]," → ","）
+    out.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | '，' | '、' | '.' | '。' | ':' | '：' | ';' | '；' | '-')
+    })
+    .to_string()
 }
 
 /// 从数组型 content 里拼接所有 text 块，跳过 tool_result 等。
@@ -705,12 +744,12 @@ fn parse_claude_line(line: &str) -> Option<ParsedQuestion> {
         return None;
     }
     let content = v.get("message").and_then(|m| m.get("content"))?;
-    let text = match content {
+    let raw = match content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(_) => join_text_blocks(content, "text", "type"),
         _ => return None,
     };
-    let text = text.trim().to_string();
+    let text = clean_prompt(&raw).trim().to_string();
     if !is_real_prompt(&text) {
         return None;
     }
@@ -744,7 +783,8 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
         return None;
     }
     let content = payload.get("content")?;
-    let text = join_text_blocks(content, "text", "type").trim().to_string();
+    let raw = join_text_blocks(content, "text", "type");
+    let text = clean_prompt(&raw).trim().to_string();
     if !is_real_prompt(&text) {
         return None;
     }
@@ -997,5 +1037,16 @@ mod tests {
         assert!(!is_real_prompt("[Image: source: /tmp/x.png]"));
         assert!(!is_real_prompt("<environment_context>"));
         assert!(!is_real_prompt("   "));
+        assert!(!is_real_prompt(
+            "The following is the Codex agent history whose request action you are assessing."
+        ));
+    }
+
+    #[test]
+    fn cleans_image_noise_from_prompt() {
+        let raw = "<image name=[Image #1] path=\"/tmp/codex-clipboard-x.png\"></image>[Image #1] 这页面太粗糙了，设计一下。";
+        assert_eq!(super::clean_prompt(raw).trim(), "这页面太粗糙了，设计一下。");
+        // 纯图片消息清理后为空 → 不算有效提问
+        assert!(super::clean_prompt("<image path=\"/tmp/a.png\"></image>").trim().is_empty());
     }
 }
