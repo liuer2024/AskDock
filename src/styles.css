@@ -297,8 +297,10 @@ svg { display: block; }
 
 .qImg {
   display: block;
+  width: auto;
+  height: auto;
   max-width: 100%;
-  max-height: 180px;
+  max-height: 200px;
   margin-top: 6px;
   border-radius: 8px;
   border: 1px solid var(--line);
@@ -312,16 +314,38 @@ svg { display: block; }
   z-index: 50;
   display: grid;
   place-items: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.72);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.78);
   cursor: zoom-out;
+  touch-action: none;
 }
 
 .lightbox img {
-  max-width: 100%;
-  max-height: 100%;
+  max-width: 92vw;
+  max-height: 88vh;
+  object-fit: contain;
   border-radius: 10px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  transform-origin: center center;
+  transition: transform 0.06s linear;
+  will-change: transform;
+  user-select: none;
+}
+
+.lightbox img.zoomed { cursor: grab; transition: none; }
+.lightbox img.zoomed:active { cursor: grabbing; }
+
+.lightboxHint {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 20px;
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  pointer-events: none;
 }
 
 .entry:hover { background: var(--hover); }

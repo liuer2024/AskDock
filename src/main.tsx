@@ -421,12 +421,74 @@ function Dock() {
         </button>
       </footer>
 
-      {lightbox ? (
-        <div className="lightbox" onClick={() => setLightbox(null)}>
-          <img src={lightbox} alt="图片" />
-        </div>
-      ) : null}
+      {lightbox ? <Lightbox src={lightbox} onClose={() => setLightbox(null)} /> : null}
     </main>
+  );
+}
+
+/* ===================== 图片查看器（滚轮缩放 / 拖动平移 / 双击复位） ===================== */
+
+function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  const [zoom, setZoom] = React.useState(1);
+  const [pan, setPan] = React.useState({ x: 0, y: 0 });
+  const drag = React.useRef<{ x: number; y: number } | null>(null);
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      setZoom((z) => Math.min(8, Math.max(1, z * factor)));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  React.useEffect(() => {
+    if (zoom <= 1) setPan({ x: 0, y: 0 });
+  }, [zoom]);
+
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={rootRef}
+      className="lightbox"
+      onClick={onClose}
+      onPointerMove={(e) => {
+        if (drag.current) setPan({ x: e.clientX - drag.current.x, y: e.clientY - drag.current.y });
+      }}
+      onPointerUp={() => (drag.current = null)}
+      onPointerLeave={() => (drag.current = null)}
+    >
+      <img
+        src={src}
+        alt="图片"
+        draggable={false}
+        className={zoom > 1 ? "zoomed" : ""}
+        style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          setZoom((z) => (z > 1 ? 1 : 2));
+        }}
+        onPointerDown={(e) => {
+          if (zoom > 1) {
+            e.stopPropagation();
+            drag.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+          }
+        }}
+      />
+      <div className="lightboxHint">滚轮缩放 · 拖动平移 · 双击复位 · Esc/点背景关闭</div>
+    </div>
   );
 }
 
