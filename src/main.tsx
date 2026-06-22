@@ -34,7 +34,7 @@ type Prefs = {
   theme: string;
   font_face: string;
   font_size: string;
-  glass: boolean;
+  glass: string;
   dock_mode: string;
   attach_side: string;
   dock_width: number;
@@ -46,7 +46,7 @@ const DEFAULT_PREFS: Prefs = {
   theme: "linen",
   font_face: "system",
   font_size: "medium",
-  glass: false,
+  glass: "off",
   dock_mode: "terminal",
   attach_side: "right",
   dock_width: 360,
@@ -174,7 +174,7 @@ function useApplyAppearance(prefs: Prefs) {
     root.setAttribute("data-theme", prefs.theme);
     root.setAttribute("data-face", prefs.font_face);
     root.setAttribute("data-size", prefs.font_size);
-    root.setAttribute("data-glass", prefs.glass ? "on" : "off");
+    root.setAttribute("data-glass", prefs.glass || "off");
   }, [prefs.theme, prefs.font_face, prefs.font_size, prefs.glass]);
 }
 
@@ -421,7 +421,7 @@ function SettingsPage() {
           theme: next.theme,
           fontFace: next.font_face,
           fontSize: next.font_size,
-          glass: next.glass,
+          glass: next.glass || "off",
           mode: next.dock_mode,
           side: next.attach_side,
           width: next.dock_width,
@@ -477,11 +477,11 @@ function SettingsPage() {
                 ))}
               </div>
             </div>
-            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>质感</div>
+            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>玻璃（macOS）</div>
             <div className="prefsCard">
               <div className="prefsRow">
-                <span>毛玻璃效果（macOS）</span>
-                <Segmented value={prefs.glass ? "on" : "off"} onChange={(v) => update({ glass: v === "on" })} options={[["off", "关"], ["on", "开"]]} />
+                <span>玻璃质感</span>
+                <Segmented value={prefs.glass || "off"} onChange={(v) => update({ glass: v })} options={[["off", "关"], ["frosted", "经典磨砂"], ["liquid", "液态风"]]} />
               </div>
             </div>
           </>
