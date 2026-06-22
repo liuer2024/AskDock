@@ -43,6 +43,7 @@ struct Prefs {
     font_face: String,
     font_size: String,
     glass: String,
+    corner_radius: String,
     dock_mode: String,
     attach_side: String,
     dock_width: i32,
@@ -99,12 +100,15 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_position(PhysicalPosition::new(80, 80))?;
                 window.set_size(PhysicalSize::new(360, 620))?;
-                let glass_mode = {
+                let (glass_mode, radius) = {
                     let db = app.state::<Db>();
                     let conn = db.0.lock().unwrap();
-                    get_str_setting(&conn, "glass", "off")
+                    (
+                        get_str_setting(&conn, "glass", "off"),
+                        radius_max(&get_str_setting(&conn, "corner_radius", "0,0,0,0")),
+                    )
                 };
-                apply_glass(&window, &glass_mode);
+                apply_glass(&window, &glass_mode, radius);
                 window.show()?;
                 window.set_focus()?;
             }
@@ -203,6 +207,7 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
           ('font_face', 'system'),
           ('font_size', 'medium'),
           ('glass', 'off'),
+          ('corner_radius', '0,0,0,0'),
           ('dock_mode', 'terminal'),
           ('attach_side', 'right'),
           ('dock_width', '360'),
@@ -312,6 +317,7 @@ fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
             "1" | "true" => "frosted".to_string(),
             _ => "off".to_string(),
         },
+        corner_radius: get_str_setting(&conn, "corner_radius", "0,0,0,0"),
         dock_mode: get_str_setting(&conn, "dock_mode", "terminal"),
         attach_side: get_str_setting(&conn, "attach_side", "right"),
         dock_width: get_i32_setting(&conn, "dock_width", 360),
@@ -330,6 +336,7 @@ fn set_prefs(
     font_face: String,
     font_size: String,
     glass: String,
+    corner_radius: String,
     mode: String,
     side: String,
     width: i32,
@@ -340,6 +347,15 @@ fn set_prefs(
     let glass = match glass.as_str() {
         "frosted" | "liquid" => glass,
         _ => "off".to_string(),
+    };
+    // 规整圆角字符串为 4 个 0..=40 的整数 "tl,tr,bl,br"
+    let corner_radius = {
+        let mut v: Vec<i32> = corner_radius
+            .split(',')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(0).clamp(0, 40))
+            .collect();
+        v.resize(4, 0);
+        format!("{},{},{},{}", v[0], v[1], v[2], v[3])
     };
     let side = match side.as_str() {
         "left" | "right" | "top" | "bottom" => side,
@@ -353,6 +369,7 @@ fn set_prefs(
         set_setting(&conn, "font_face", &font_face)?;
         set_setting(&conn, "font_size", &font_size)?;
         set_setting(&conn, "glass", &glass)?;
+        set_setting(&conn, "corner_radius", &corner_radius)?;
         set_setting(&conn, "dock_mode", &mode)?;
         set_setting(&conn, "attach_side", &side)?;
         set_setting(&conn, "dock_width", &width.to_string())?;
@@ -360,7 +377,7 @@ fn set_prefs(
         set_setting(&conn, "follow_terminal", if follow { "1" } else { "0" })?;
     }
     if let Some(window) = app.get_webview_window("main") {
-        apply_glass(&window, &glass);
+        apply_glass(&window, &glass, radius_max(&corner_radius));
     }
     let terminal = detect_front_terminal().ok().flatten().map(|win| win.rect);
     let _ = reposition_dock(&app, &db, terminal);
@@ -369,22 +386,31 @@ fn set_prefs(
 }
 
 /// 给窗口加/去 macOS 毛玻璃(NSVisualEffectView)。需要窗口透明 + CSS 半透明背景才看得到。
-/// 给浮窗加 macOS 玻璃：frosted=矩形磨砂；liquid=圆角磨砂(配 CSS 高光模拟液态玻璃)；其它=去掉。
+/// 从 "tl,tr,bl,br" 取最大圆角(原生 vibrancy 只能整体一个半径，取最大值近似)。
+fn radius_max(corner_radius: &str) -> f64 {
+    corner_radius
+        .split(',')
+        .filter_map(|s| s.trim().parse::<f64>().ok())
+        .fold(0.0_f64, f64::max)
+        .clamp(0.0, 40.0)
+}
+
+/// 给浮窗加 macOS 玻璃：frosted=磨砂；liquid=磨砂+CSS 高光(模拟液态玻璃)；其它=去掉。
+/// radius 为原生 vibrancy 的整体圆角(0 表示矩形)。
 #[cfg(target_os = "macos")]
-fn apply_glass(window: &tauri::WebviewWindow, mode: &str) {
+fn apply_glass(window: &tauri::WebviewWindow, mode: &str, radius: f64) {
     use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-    // 先清掉旧的，避免切换模式时叠加多层效果。
+    // 先清掉旧的，避免切换模式/半径时叠加多层效果。
     let _ = clear_vibrancy(window);
-    let radius = match mode {
-        "frosted" => None,
-        "liquid" => Some(16.0),
-        _ => return,
-    };
+    if mode != "frosted" && mode != "liquid" {
+        return;
+    }
+    let radius = if radius > 0.0 { Some(radius) } else { None };
     let _ = apply_vibrancy(window, NSVisualEffectMaterial::Sidebar, Some(NSVisualEffectState::Active), radius);
 }
 
 #[cfg(not(target_os = "macos"))]
-fn apply_glass(_window: &tauri::WebviewWindow, _mode: &str) {}
+fn apply_glass(_window: &tauri::WebviewWindow, _mode: &str, _radius: f64) {}
 
 /// 打开（或聚焦）独立的设置窗口。它加载同一前端，按窗口 label 渲染设置页。
 #[tauri::command]

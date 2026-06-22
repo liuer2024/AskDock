@@ -88,26 +88,28 @@ svg { display: block; }
   height: 100vh;
   background: var(--bg);
   color: var(--text);
+  border-radius: var(--radius, 0);
+  overflow: hidden;
 }
 
 /* 毛玻璃：窗口透明 + 原生 NSVisualEffectView 在后面，浮窗背景改成半透明
    让模糊透出来（主题色作为薄薄的一层着色）。仅作用于浮窗，不影响设置窗口。 */
-/* 经典磨砂：矩形，主题色薄薄一层，让原生模糊透出来 */
+/* 经典磨砂：主题色薄薄一层(更通透,让原生模糊明显透出来) + 一圈细边定义轮廓 */
 :root[data-glass="frosted"] body { background: transparent; }
 :root[data-glass="frosted"] .dock {
-  background: rgb(from var(--bg) r g b / 0.4);
+  background: rgb(from var(--bg) r g b / 0.28);
+  border: 1px solid rgb(from var(--text) r g b / 0.1);
 }
 
-/* 液态风：圆角 + 更通透 + 顶部高光 + 一圈淡描边，CSS 模拟 Liquid Glass 的轻盈玻璃板 */
+/* 液态风：更通透 + 顶部高光 + 淡描边 + 柔和内发光，CSS 模拟 Liquid Glass 的轻盈玻璃质感
+   (圆角走统一的 --radius 设置) */
 :root[data-glass="liquid"] body { background: transparent; }
 :root[data-glass="liquid"] .dock {
-  background: rgb(from var(--bg) r g b / 0.26);
-  border-radius: 16px;
-  border: 1px solid rgb(from #ffffff r g b / 0.16);
+  background: rgb(from var(--bg) r g b / 0.2);
+  border: 1px solid rgb(from #ffffff r g b / 0.2);
   box-shadow:
-    inset 0 1px 0 rgb(from #ffffff r g b / 0.4),
-    inset 0 0 22px rgb(from #ffffff r g b / 0.05);
-  overflow: hidden;
+    inset 0 1px 0 rgb(from #ffffff r g b / 0.5),
+    inset 0 0 26px rgb(from #ffffff r g b / 0.07);
 }
 
 .titlebar {
@@ -492,6 +494,9 @@ svg { display: block; }
 .numField i { color: var(--faint); font-size: 11px; font-style: normal; }
 
 .autoTag { color: var(--faint); font-size: 12px; }
+
+.cornerPair { display: inline-flex; gap: 6px; }
+.cornerPair .numField input { width: 52px; }
 
 .aboutTitle { display: flex; align-items: baseline; gap: 7px; margin-bottom: 7px; }
 .aboutTitle strong { font-size: 15px; }

@@ -35,6 +35,7 @@ type Prefs = {
   font_face: string;
   font_size: string;
   glass: string;
+  corner_radius: string;
   dock_mode: string;
   attach_side: string;
   dock_width: number;
@@ -47,6 +48,7 @@ const DEFAULT_PREFS: Prefs = {
   font_face: "system",
   font_size: "medium",
   glass: "off",
+  corner_radius: "0,0,0,0",
   dock_mode: "terminal",
   attach_side: "right",
   dock_width: 360,
@@ -175,7 +177,9 @@ function useApplyAppearance(prefs: Prefs) {
     root.setAttribute("data-face", prefs.font_face);
     root.setAttribute("data-size", prefs.font_size);
     root.setAttribute("data-glass", prefs.glass || "off");
-  }, [prefs.theme, prefs.font_face, prefs.font_size, prefs.glass]);
+    const [tl, tr, bl, br] = (prefs.corner_radius || "0,0,0,0").split(",").map((n) => Number(n) || 0);
+    root.style.setProperty("--radius", `${tl}px ${tr}px ${br}px ${bl}px`); // CSS 顺序: 左上 右上 右下 左下
+  }, [prefs.theme, prefs.font_face, prefs.font_size, prefs.glass, prefs.corner_radius]);
 }
 
 type Option = [value: string, label: string];
@@ -422,6 +426,7 @@ function SettingsPage() {
           fontFace: next.font_face,
           fontSize: next.font_size,
           glass: next.glass || "off",
+          cornerRadius: next.corner_radius || "0,0,0,0",
           mode: next.dock_mode,
           side: next.attach_side,
           width: next.dock_width,
@@ -436,6 +441,25 @@ function SettingsPage() {
   const isScreen = prefs.dock_mode === "screen";
   const widthAuto = !isScreen && prefs.follow && (prefs.attach_side === "top" || prefs.attach_side === "bottom");
   const heightAuto = !isScreen && prefs.follow && (prefs.attach_side === "left" || prefs.attach_side === "right");
+
+  // 圆角四角: [左上, 右上, 左下, 右下]
+  const radii = (prefs.corner_radius || "0,0,0,0").split(",").map((n) => Number(n) || 0);
+  const setRadius = (index: number, value: number) => {
+    const next = [radii[0] || 0, radii[1] || 0, radii[2] || 0, radii[3] || 0];
+    next[index] = Math.max(0, Math.min(40, value || 0));
+    update({ corner_radius: next.join(",") });
+  };
+  const cornerInput = (index: number) => (
+    <span className="numField">
+      <input
+        type="number"
+        min={0}
+        max={40}
+        value={radii[index] || 0}
+        onChange={(e) => setRadius(index, Number(e.target.value))}
+      />
+    </span>
+  );
 
   return (
     <div className="prefs">
@@ -482,6 +506,17 @@ function SettingsPage() {
               <div className="prefsRow">
                 <span>玻璃质感</span>
                 <Segmented value={prefs.glass || "off"} onChange={(v) => update({ glass: v })} options={[["off", "关"], ["frosted", "经典磨砂"], ["liquid", "液态风"]]} />
+              </div>
+            </div>
+            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>圆角（px，0=直角）</div>
+            <div className="prefsCard">
+              <div className="prefsRow">
+                <span>左上 / 右上</span>
+                <span className="cornerPair">{cornerInput(0)}{cornerInput(1)}</span>
+              </div>
+              <div className="prefsRow">
+                <span>左下 / 右下</span>
+                <span className="cornerPair">{cornerInput(2)}{cornerInput(3)}</span>
               </div>
             </div>
           </>
