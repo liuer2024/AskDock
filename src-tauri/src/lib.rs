@@ -42,6 +42,7 @@ struct Prefs {
     theme: String,
     font_face: String,
     font_size: String,
+    glass: bool,
     dock_mode: String,
     attach_side: String,
     dock_width: i32,
@@ -97,7 +98,13 @@ pub fn run() {
             setup_tray(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_position(PhysicalPosition::new(80, 80))?;
-                window.set_size(PhysicalSize::new(300, 640))?;
+                window.set_size(PhysicalSize::new(360, 620))?;
+                let glass_on = {
+                    let db = app.state::<Db>();
+                    let conn = db.0.lock().unwrap();
+                    get_i32_setting(&conn, "glass", 0) != 0
+                };
+                apply_glass(&window, glass_on);
                 window.show()?;
                 window.set_focus()?;
             }
@@ -195,6 +202,7 @@ fn init_database(app: &AppHandle) -> tauri::Result<Connection> {
           ('theme', 'linen'),
           ('font_face', 'system'),
           ('font_size', 'medium'),
+          ('glass', '0'),
           ('dock_mode', 'terminal'),
           ('attach_side', 'right'),
           ('dock_width', '360'),
@@ -299,6 +307,7 @@ fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
         theme: get_str_setting(&conn, "theme", "linen"),
         font_face: get_str_setting(&conn, "font_face", "system"),
         font_size: get_str_setting(&conn, "font_size", "medium"),
+        glass: get_i32_setting(&conn, "glass", 0) != 0,
         dock_mode: get_str_setting(&conn, "dock_mode", "terminal"),
         attach_side: get_str_setting(&conn, "attach_side", "right"),
         dock_width: get_i32_setting(&conn, "dock_width", 360),
@@ -316,6 +325,7 @@ fn set_prefs(
     theme: String,
     font_face: String,
     font_size: String,
+    glass: bool,
     mode: String,
     side: String,
     width: i32,
@@ -334,17 +344,40 @@ fn set_prefs(
         set_setting(&conn, "theme", &theme)?;
         set_setting(&conn, "font_face", &font_face)?;
         set_setting(&conn, "font_size", &font_size)?;
+        set_setting(&conn, "glass", if glass { "1" } else { "0" })?;
         set_setting(&conn, "dock_mode", &mode)?;
         set_setting(&conn, "attach_side", &side)?;
         set_setting(&conn, "dock_width", &width.to_string())?;
         set_setting(&conn, "dock_height", &height.to_string())?;
         set_setting(&conn, "follow_terminal", if follow { "1" } else { "0" })?;
     }
+    if let Some(window) = app.get_webview_window("main") {
+        apply_glass(&window, glass);
+    }
     let terminal = detect_front_terminal().ok().flatten().map(|win| win.rect);
     let _ = reposition_dock(&app, &db, terminal);
     let _ = app.emit("prefs-changed", ());
     Ok(())
 }
+
+/// 给窗口加/去 macOS 毛玻璃(NSVisualEffectView)。需要窗口透明 + CSS 半透明背景才看得到。
+#[cfg(target_os = "macos")]
+fn apply_glass(window: &tauri::WebviewWindow, on: bool) {
+    use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+    if on {
+        let _ = apply_vibrancy(
+            window,
+            NSVisualEffectMaterial::Sidebar,
+            Some(NSVisualEffectState::Active),
+            None,
+        );
+    } else {
+        let _ = clear_vibrancy(window);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_glass(_window: &tauri::WebviewWindow, _on: bool) {}
 
 /// 打开（或聚焦）独立的设置窗口。它加载同一前端，按窗口 label 渲染设置页。
 #[tauri::command]

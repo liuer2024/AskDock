@@ -90,6 +90,13 @@ svg { display: block; }
   color: var(--text);
 }
 
+/* 毛玻璃：窗口透明 + 原生 NSVisualEffectView 在后面，浮窗背景改成半透明
+   让模糊透出来（主题色作为薄薄的一层着色）。仅作用于浮窗，不影响设置窗口。 */
+:root[data-glass="on"] body { background: transparent; }
+:root[data-glass="on"] .dock {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
 .titlebar {
   display: flex;
   align-items: center;

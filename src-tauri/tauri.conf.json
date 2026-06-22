@@ -21,7 +21,7 @@
         "minHeight": 480,
         "decorations": false,
         "alwaysOnTop": true,
-        "transparent": false,
+        "transparent": true,
         "resizable": true,
         "visible": true,
         "skipTaskbar": false
@@ -29,7 +29,8 @@
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
