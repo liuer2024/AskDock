@@ -815,38 +815,19 @@ fn dedup_key(source: &str, uuid: Option<&str>, asked_at: &str, text: &str) -> St
 
 /// 归类并入库；返回是否真的新插入了一条（去重命中则返回 false）。
 ///
-/// 归类规则：同一会话(session_id)黏在它**第一次被记录**的那个窗口上，
-/// 这样即使后续某条提问被抓到的瞬间你正好切到了别的终端，也不会跑偏；
-/// 只有该会话从没绑过窗口时，才用“当下前台终端”来定。
+/// 归类规则：归到**写入那一刻的前台终端窗口**。因为我们只抓用户真正手敲
+/// 的提问（合成消息、工具结果、agent-history 都已过滤），它必然发生在当前
+/// 聚焦的窗口里，所以当下前台即正确归属。**不再做会话黏定** —— 黏定会把一
+/// 个会话永久锁死在它第一次出现的窗口上，导致同一应用的多窗口分不开。
 fn store_question(app: &AppHandle, source: &str, parsed: ParsedQuestion) -> bool {
+    let window_id = detect_front_terminal()
+        .ok()
+        .flatten()
+        .map(|win| win.window_id.to_string());
+
     let Some(db) = app.try_state::<Db>() else {
         return false;
     };
-
-    let sticky: Option<String> = {
-        let Ok(conn) = db.0.lock() else {
-            return false;
-        };
-        parsed.session_id.as_ref().and_then(|sid| {
-            conn.query_row(
-                "SELECT window_id FROM questions
-                 WHERE session_id = ?1 AND window_id IS NOT NULL
-                 ORDER BY datetime(created_at) DESC LIMIT 1",
-                params![sid],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-    };
-
-    let window_id = match sticky {
-        Some(window) => Some(window),
-        None => detect_front_terminal()
-            .ok()
-            .flatten()
-            .map(|win| win.window_id.to_string()),
-    };
-
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let Ok(conn) = db.0.lock() else {

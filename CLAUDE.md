@@ -97,17 +97,20 @@ AI tools' session transcripts and harvests new user prompts:
   extracts the user's text (string content, or joined `text`/`input_text` blocks) and
   drops noise — slash-command wrappers (`<command-message>`…), `tool_result` blocks,
   `<environment_context>`, image-reference lines, etc.
-- **Window attribution** (`store_question`): a question binds to a terminal window's
-  CGWindowID. **Session stickiness is primary** — if any prior question with the same
-  `session_id` already has a window, the new one reuses it (so a session's questions stay
-  with the terminal it actually runs in, even if focus moved by the time the ~800ms poll
-  captures). Only a session's *first* question falls back to "whichever recognized
-  terminal is frontmost right now" (`detect_front_terminal`); if none is frontmost it's
-  stored with `window_id = NULL` (not shown). There is deliberately **no** "last terminal"
-  fallback — that previously leaked questions from an unrecognized terminal onto the last
-  recognized one. So `TERMINAL_APP_NAMES` must list every terminal the user uses, or its
-  questions can't be attributed; keep it broad (Ghostty, iTerm, Terminal, Warp, Alacritty,
-  WezTerm, Otty, kitty, Tabby, Hyper, Rio, WaveTerm, …).
+- **Window attribution** (`store_question`): a question binds to **whichever recognized
+  terminal window is frontmost at capture time** (`detect_front_terminal`'s CGWindowID);
+  if none is frontmost it's stored with `window_id = NULL` (not shown). This is correct
+  *because we only capture real user-typed prompts* — synthetic user-role messages (tool
+  results, `<image>` blocks, Codex "agent history" deltas) are filtered out in parsing, and
+  a genuinely-typed prompt is always written while its own terminal window is focused. So
+  there is deliberately **no** session-stickiness and **no** "last terminal" fallback: both
+  were tried and both caused bugs — stickiness permanently pinned a session to its
+  first-seen window (so two AI tools in two windows of the same app couldn't separate), and
+  the last-terminal fallback leaked an unrecognized terminal's questions onto the last
+  recognized one. Consequence: `TERMINAL_APP_NAMES` must list every terminal the user uses
+  or its questions can't be attributed — keep it broad (Ghostty, iTerm, Terminal, Warp,
+  Alacritty, WezTerm, Otty, kitty, Tabby, Hyper, Rio, WaveTerm, …). CGWindowID reliably
+  distinguishes separate windows of the same app (verified for multi-window Otty).
 - **Dedup**: `questions.dedup_key` is `UNIQUE`; inserts are `INSERT OR IGNORE`. Key is
   `claude:<uuid>` (Claude has per-message uuids) or `codex:h<hash>` (Codex has none, so
   hash of source+timestamp+text). On a real insert the thread emits `questions-updated`.
