@@ -92,6 +92,167 @@ svg { display: block; }
   overflow: hidden;
 }
 
+/* 刘海式收起的把手：占满整个(很窄的)窗口，贴屏幕右缘、左侧圆角 */
+.notchRoot {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.notchHandle {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-right: none;
+  border-radius: 9px 0 0 9px;
+}
+
+.notchHandle .grip {
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  background: var(--line-strong);
+  transition: background 0.15s, height 0.15s;
+}
+
+.notchHandle:hover .grip { background: var(--codex); height: 48px; }
+
+/* 收起显示小人时，整页(html/body)背景也透明，否则根元素的主题色会盖住透明窗口。 */
+:root[data-petnotch="1"],
+:root[data-petnotch="1"] body { background: transparent !important; }
+
+/* 收起到边缘的小人：窗口与整页都透明，小人探身扒在屏幕右缘，而不是装在卡片里。 */
+.petStage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;     /* 贴底，像站/趴在那儿 */
+  justify-content: flex-end; /* 贴屏幕右缘 */
+  overflow: hidden;
+  background: transparent;
+}
+.petSprite {
+  background-repeat: no-repeat;
+  flex: none;
+}
+/* 把手里的小人：大幅右移，让右半身没入屏幕边外，只露左半身+头往里瞅（探出半身）。
+   脚下一抹淡影增加贴在屏幕上的实感。 */
+.petStage .petSprite {
+  transform: translateX(52px);
+  filter: drop-shadow(-2px 3px 3px rgba(0, 0, 0, 0.25));
+  animation: petSlideIn 0.32s ease-out;
+}
+@keyframes petSlideIn {
+  from { transform: translateX(120px); opacity: 0; }
+  to { transform: translateX(52px); opacity: 1; }
+}
+/* 拖到桌面后＝桌面宠物：完整居中显示，不再探出半身/裁切。 */
+.petStage.free { justify-content: center; }
+.petStage.free .petSprite {
+  transform: none;
+  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.25));
+  animation: petPop 0.2s ease-out;
+}
+@keyframes petPop {
+  from { transform: scale(0.92); opacity: 0.5; }
+  to { transform: none; opacity: 1; }
+}
+
+/* 右键菜单态：窗口临时增高，小人占顶部固定区，菜单弹在其下方（不盖住小人）。 */
+.notchRoot { position: relative; }
+.notchRoot.menuing .petStage { height: 172px; }
+.petMenu {
+  position: absolute;
+  top: 178px; /* 小人(172) 下方 */
+  left: 8px;
+  right: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  z-index: 10;
+}
+.petMenu button {
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.petMenu button:hover { background: var(--hover); }
+.petMenuSep { height: 1px; background: var(--line); margin: 4px 4px; }
+
+/* 设置里的小人选择器 */
+.petPicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 4px 14px 4px; /* 左右对齐其它设置行，别贴卡片边；上方由 petRow 的 padding 留白 */
+}
+.petChoice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 78px;
+  padding: 8px 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--dim);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.petChoice:hover { background: var(--hover); }
+.petChoice.on {
+  border-color: var(--codex);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--codex);
+}
+.petChoiceArt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 66px;
+}
+.petChoiceName { font-size: 12px; line-height: 1; }
+.petActions { display: flex; gap: 8px; margin: 14px 14px 2px; }
+.petBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.petBtn:hover { background: var(--hover); }
+.petBtn.ghost { color: var(--dim); }
+.petGalleryHint { margin: 10px 14px 14px; }
+.petGalleryHint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--hover);
+}
+
 /* 毛玻璃：窗口透明 + 原生 NSVisualEffectView 在后面，浮窗背景改成半透明
    让模糊透出来（主题色作为薄薄的一层着色）。仅作用于浮窗，不影响设置窗口。 */
 /* 经典磨砂：主题色薄薄一层(更通透,让原生模糊明显透出来) + 一圈细边定义轮廓 */
@@ -231,6 +392,35 @@ svg { display: block; }
 }
 
 .daymark .rule { flex: 1; height: 1px; background: var(--hairline); }
+
+/* 项目分组（自绘 tab 终端的多 tab：按工作目录分清） */
+.projGroup + .projGroup { margin-top: 14px; }
+
+.projmark {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0 6px;
+  padding-left: 6px;
+}
+
+.projGroup:first-child .projmark { margin-top: 2px; }
+
+.projmark svg { color: var(--faint); flex: none; }
+
+.projmark span {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  font-weight: 600;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 62%;
+}
+
+.projmark .rule { flex: 1; height: 1px; background: var(--hairline); }
 
 .entry {
   position: relative;
@@ -494,6 +684,15 @@ svg { display: block; }
 
 .prefsRow + .prefsRow { border-top: 1px solid var(--hairline); }
 
+.rowSub {
+  display: inline-block;
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.4;
+}
+
 /* 分段控件 */
 .segmented {
   display: inline-flex;
@@ -558,6 +757,54 @@ svg { display: block; }
 .numField i { color: var(--faint); font-size: 11px; font-style: normal; }
 
 .autoTag { color: var(--faint); font-size: 12px; }
+
+/* 立即清理按钮 */
+.purgeAction { display: inline-flex; align-items: center; gap: 10px; }
+.purgeMsg { color: var(--faint); font-size: 12px; font-style: normal; }
+
+.prefsBtn {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+
+.prefsBtn:hover:not(:disabled) { border-color: var(--line-strong); background: var(--hover); }
+.prefsBtn:disabled { opacity: 0.55; cursor: default; }
+
+.prefsBtn.danger { color: #e5534b; border-color: rgb(from #e5534b r g b / 0.4); }
+.prefsBtn.danger:hover:not(:disabled) { border-color: #e5534b; background: rgb(from #e5534b r g b / 0.1); }
+
+/* 二次确认弹框 */
+.confirmOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(from #000 r g b / 0.4);
+  animation: confirmFade 0.12s ease;
+}
+
+.confirmCard {
+  width: 300px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 12px 40px rgb(from #000 r g b / 0.35);
+}
+
+.confirmTitle { color: var(--text); font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.confirmBody { color: var(--dim); font-size: 12px; line-height: 1.6; margin: 0 0 16px; }
+.confirmActions { display: flex; justify-content: flex-end; gap: 8px; }
+
+@keyframes confirmFade { from { opacity: 0; } to { opacity: 1; } }
 
 .cornerPair { display: inline-flex; gap: 6px; }
 .cornerPair .numField input { width: 52px; }

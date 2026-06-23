@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Check, Copy, Filter, Info, Palette, PanelRight, Settings, Type, X, Zap } from "lucide-react";
+import { Check, Copy, Filter, Folder, Info, Palette, PanelRight, PanelRightClose, PanelRightOpen, Settings, Type, X, Zap } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -50,6 +50,18 @@ type Prefs = {
   dock_width: number;
   dock_height: number;
   follow: boolean;
+  group_drawn_tabs: boolean;
+  group_native_windows: boolean;
+  notch_expand: string;
+  notch_mascot: string;
+};
+
+// 一只边缘小人（Codex Pets 格式：pet.json + 精灵图）。
+type PetInfo = {
+  id: string;
+  display_name: string;
+  description: string;
+  spritesheet: string; // 绝对路径（Tauri 下用 convertFileSrc）或 dev 预览的 /sprout.png
 };
 
 const DEFAULT_PREFS: Prefs = {
@@ -64,8 +76,74 @@ const DEFAULT_PREFS: Prefs = {
   attach_side: "right",
   dock_width: 360,
   dock_height: 620,
-  follow: true
+  follow: true,
+  group_drawn_tabs: true,
+  group_native_windows: false,
+  notch_expand: "hover",
+  notch_mascot: "sprout"
 };
+
+// 边缘小人精灵图的通用规格（Codex Pets 标准）：8 列 × 9 行，每格 192×208，透明。
+// 9 行 = 9 个动画状态，帧数与逐帧时序固定，社区现成宠物都遵循这套。
+const PET_CELL_W = 192;
+const PET_CELL_H = 208;
+const PET_COLS = 8;
+type PetRow = { name: string; index: number; frames: number; timings: number[] };
+const PET_ROWS: PetRow[] = [
+  { name: "idle", index: 0, frames: 6, timings: [280, 110, 110, 140, 140, 320] },
+  { name: "running-right", index: 1, frames: 8, timings: [120, 120, 120, 120, 120, 120, 120, 220] },
+  { name: "running-left", index: 2, frames: 8, timings: [120, 120, 120, 120, 120, 120, 120, 220] },
+  { name: "waving", index: 3, frames: 4, timings: [140, 140, 140, 280] },
+  { name: "jumping", index: 4, frames: 5, timings: [140, 140, 140, 140, 280] },
+  { name: "failed", index: 5, frames: 8, timings: [140, 140, 140, 140, 140, 140, 140, 240] },
+  { name: "waiting", index: 6, frames: 6, timings: [150, 150, 150, 150, 150, 260] },
+  { name: "running", index: 7, frames: 6, timings: [120, 120, 120, 120, 120, 220] },
+  { name: "review", index: 8, frames: 6, timings: [150, 150, 150, 150, 150, 280] }
+];
+const PET_ROW_BY_NAME: Record<string, PetRow> = Object.fromEntries(PET_ROWS.map((r) => [r.name, r]));
+const PET_ROW_COUNT = PET_ROWS.length;
+const PET_DISPLAY_H = 124; // 把手里精灵的显示高度（px）；宽≈114，恰好放进 120 宽的把手窗口
+
+// 精灵图 URL：Tauri 下走 asset 协议（路径在 $APPDATA/**，已在白名单），dev 直接用原路径。
+function petSheetSrc(path: string) {
+  return isTauriRuntime() ? convertFileSrc(path) : path;
+}
+
+// 一只会动的小人：按所选动画行(state)用逐帧时序循环切帧（比纯 CSS steps() 更忠实）。
+function PetSprite({ sheet, state, displayH = PET_DISPLAY_H }: { sheet: string; state: string; displayH?: number }) {
+  const row = PET_ROW_BY_NAME[state] ?? PET_ROW_BY_NAME.idle;
+  const [frame, setFrame] = React.useState(0);
+  React.useEffect(() => {
+    setFrame(0);
+    let i = 0;
+    let timer: number | undefined;
+    const step = () => {
+      const wait = row.timings[i] ?? 140;
+      timer = window.setTimeout(() => {
+        i = (i + 1) % row.frames;
+        setFrame(i);
+        step();
+      }, wait);
+    };
+    step();
+    return () => window.clearTimeout(timer);
+  }, [row]);
+  const scale = displayH / PET_CELL_H;
+  const w = PET_CELL_W * scale;
+  const h = PET_CELL_H * scale;
+  return (
+    <div
+      className="petSprite"
+      style={{
+        width: `${w}px`,
+        height: `${h}px`,
+        backgroundImage: `url(${petSheetSrc(sheet)})`,
+        backgroundSize: `${PET_COLS * w}px ${PET_ROW_COUNT * h}px`,
+        backgroundPosition: `${-frame * w}px ${-row.index * h}px`
+      }}
+    />
+  );
+}
 
 const THEMES: { id: string; name: string; bg: string; a: string; b: string }[] = [
   { id: "midnight", name: "午夜", bg: "#0e1014", a: "#3fcf8e", b: "#d97757" },
@@ -75,6 +153,10 @@ const THEMES: { id: string; name: string; bg: string; a: string; b: string }[] =
   { id: "linen", name: "亚麻", bg: "#f4f0e7", a: "#18895a", b: "#bf552f" },
   { id: "slate", name: "石板", bg: "#f1f3f6", a: "#0f9b69", b: "#c2562f" }
 ];
+
+// 原生 tab 终端：每个 tab 是独立窗口（独立 CGWindowID），一个 window_id 里的多 cwd
+// 是同一 tab 内 cd 出来的。其余（iTerm2/Otty/Warp…）是自绘 tab，多 tab 挤一个 window_id。
+const NATIVE_TAB_TERMINALS = ["Ghostty", "Terminal", "Apple Terminal"];
 
 const APPEARANCE_KEY = "askdock.appearance";
 
@@ -145,6 +227,9 @@ async function browserCommand<T>(name: string, args: Record<string, unknown>): P
     writeBrowserQuestions([]);
     return undefined as T;
   }
+  if (name === "purge_cache_now") {
+    return { rows: 0, images: 0 } as T;
+  }
   if (name === "get_prefs") {
     const t = new URLSearchParams(location.search).get("theme");
     return { ...DEFAULT_PREFS, ...(t ? { theme: t } : {}) } as T;
@@ -154,7 +239,17 @@ async function browserCommand<T>(name: string, args: Record<string, unknown>): P
     location.reload();
     return undefined as T;
   }
-  if (name === "hide_main_window" || name === "set_prefs") {
+  if (name === "list_pets") {
+    return [
+      { id: "sprout", display_name: "小芽", description: "AskDock 内置的小芽，扒在屏幕边看着你。", spritesheet: "/sprout.png" }
+    ] as T;
+  }
+  if (
+    name === "hide_main_window" ||
+    name === "set_prefs" ||
+    name === "dock_collapse" ||
+    name === "open_pets_dir"
+  ) {
     return undefined as T;
   }
   throw new Error(`Unsupported browser command: ${name}`);
@@ -168,16 +263,19 @@ function readBrowserQuestions(): CapturedQuestion[] {
     /* ignore */
   }
   const now = Date.now();
-  const mk = (id: string, source: string, text: string, ms: number): CapturedQuestion => ({
-    id, window_id: BROWSER_WINDOW_ID, source, session_id: null, cwd: null, text, asked_at: new Date(now - ms).toISOString(), image_path: null
+  const mk = (id: string, source: string, text: string, ms: number, cwd: string | null = null): CapturedQuestion => ({
+    id, window_id: BROWSER_WINDOW_ID, source, session_id: null, cwd, text, asked_at: new Date(now - ms).toISOString(), image_path: null
   });
+  // 两个项目目录 → 演示自绘 tab 终端多 tab 的按项目分组
+  const A = "/Users/me/Documents/askDock";
+  const B = "/Users/me/Documents/peixun2024";
   const sample: CapturedQuestion[] = [
-    mk("1", "codex", "你开一个新的分支，将这些问题，用去控件化处理一下。", 2 * 60000),
-    mk("2", "codex", "现在的元素都包了边框、底色、阴影、强调色块，控件感太强，于是显得“重”。看看是不是有这个问题？", 6 * 60000),
-    mk("3", "claude", "把时间戳和来源都换成等宽字体，整体节奏会更像终端日志，也更耐看。", 90 * 60000),
-    mk("4", "claude", "左侧用一条连续的时间轴串起所有提问，最新的一条让它像光标一样在跳。", 110 * 60000),
-    mk("5", "codex", "删除按钮先去掉。归档面板的重点是回看和复用，不是管理，操作越少越安静。", 26 * 3600000),
-    mk("6", "claude", "内容直接占满整行，不要卡片。让文字本身成为主角，留白来分隔，而不是边框。", 30 * 3600000)
+    mk("1", "codex", "你开一个新的分支，将这些问题，用去控件化处理一下。", 2 * 60000, A),
+    mk("2", "codex", "现在的元素都包了边框、底色、阴影、强调色块，控件感太强，于是显得“重”。看看是不是有这个问题？", 6 * 60000, A),
+    mk("3", "claude", "把时间戳和来源都换成等宽字体，整体节奏会更像终端日志，也更耐看。", 90 * 60000, A),
+    mk("4", "claude", "学员报名后的短信通知，加一个失败重试。", 110 * 60000, B),
+    mk("5", "codex", "课程表导出 Excel，表头合并单元格。", 26 * 3600000, B),
+    mk("6", "claude", "内容直接占满整行，不要卡片。让文字本身成为主角，留白来分隔，而不是边框。", 30 * 3600000, A)
   ];
   writeBrowserQuestions(sample);
   return sample;
@@ -210,6 +308,13 @@ function dayLabel(value: string) {
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   const dd = String(date.getDate()).padStart(2, "0");
   return `${mm} / ${dd}`;
+}
+
+// 项目分组标题：取工作目录最后一段（cwd 为空 → 未归类）
+function projectLabel(cwd: string | null) {
+  if (!cwd) return "未归类";
+  const parts = cwd.split("/").filter(Boolean);
+  return parts[parts.length - 1] || cwd;
 }
 
 function useApplyAppearance(prefs: Prefs) {
@@ -261,12 +366,28 @@ function Dock() {
   const [prefs, setPrefs] = React.useState<Prefs>(initialPrefs);
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
   const [lightbox, setLightbox] = React.useState<string | null>(null);
+  const [collapsed, setCollapsed] = React.useState(false); // 刘海式收起到屏幕右缘
+  const [peeking, setPeeking] = React.useState(false); // 收起后悬停滑出中
+  const [pets, setPets] = React.useState<PetInfo[]>([]); // 已安装的边缘小人
+  const [greet, setGreet] = React.useState(false); // 抓到新提问时小人挥手一下
+  const [petDragged, setPetDragged] = React.useState(false); // 小人是否被拖到桌面任意位置（桌面宠物模式）
+  const [petMenu, setPetMenu] = React.useState(false); // 右键小人弹出的浮层菜单
+  const [petAction, setPetAction] = React.useState("idle"); // 小人当前动画（空闲时随机来点小动作）
 
   const windowIdRef = React.useRef<string | null>(null);
   windowIdRef.current = windowId;
   const freeModeRef = React.useRef(false);
   freeModeRef.current = freeMode;
+  const collapsedRef = React.useRef(false);
+  collapsedRef.current = collapsed;
+  const peekTimer = React.useRef<number | undefined>(undefined);
+  const greetTimer = React.useRef<number | undefined>(undefined);
   const holdingTitle = React.useRef(false);
+  const petDraggedRef = React.useRef(false);
+  petDraggedRef.current = petDragged;
+  const holdingPet = React.useRef(false); // 正在按住小人（可能要拖动）
+  const petDragMoved = React.useRef(false); // 本次手势是否真的拖动了
+  const petStart = React.useRef({ x: 0, y: 0 });
 
   useApplyAppearance(prefs);
 
@@ -288,6 +409,24 @@ function Dock() {
     return () => unlisten?.();
   }, []);
 
+  // 已安装小人列表：开窗加载一次，prefs 变化（含新导入/换选）后再刷新。
+  React.useEffect(() => {
+    const loadPets = async () => {
+      try {
+        setPets(await command<PetInfo[]>("list_pets"));
+      } catch {
+        /* ignore */
+      }
+    };
+    loadPets();
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    listen("prefs-changed", loadPets).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
   const refresh = React.useCallback(async (wid: string | null) => {
     if (!wid) return;
     try {
@@ -302,7 +441,7 @@ function Dock() {
     let disposed = false;
     const tick = async () => {
       try {
-        const status = await command<FrontStatus>("poll_front_window", { reposition: !freeModeRef.current });
+        const status = await command<FrontStatus>("poll_front_window", { reposition: !freeModeRef.current && !collapsedRef.current });
         if (disposed) return;
         setMessage(freeModeRef.current ? "自由位置（已停止贴靠）" : status.message);
         if (status.window_id) {
@@ -328,7 +467,15 @@ function Dock() {
   React.useEffect(() => {
     if (!isTauriRuntime()) return;
     let unlisten: (() => void) | undefined;
-    listen("questions-updated", () => refresh(windowIdRef.current)).then((fn) => {
+    listen("questions-updated", () => {
+      refresh(windowIdRef.current);
+      // 收起状态下抓到新提问 → 小人挥手一下提醒你。
+      if (collapsedRef.current) {
+        setGreet(true);
+        window.clearTimeout(greetTimer.current);
+        greetTimer.current = window.setTimeout(() => setGreet(false), 2600);
+      }
+    }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
@@ -339,12 +486,19 @@ function Dock() {
     if (!isTauriRuntime()) return;
     const onUp = () => {
       holdingTitle.current = false;
+      holdingPet.current = false;
     };
     window.addEventListener("pointerup", onUp);
     let unlisten: (() => void) | undefined;
     getCurrentWindow()
       .onMoved(() => {
         if (holdingTitle.current) setFreeMode(true);
+        // 拖动小人 → 进入桌面宠物模式（自由位置、完整显示、点击就地展开）。
+        if (holdingPet.current) {
+          petDragMoved.current = true;
+          setPetDragged(true);
+          setFreeMode(true);
+        }
       })
       .then((fn) => {
         unlisten = fn;
@@ -369,6 +523,58 @@ function Dock() {
     }
   }
 
+  // ===== 刘海式收起 =====
+  const enterCollapse = React.useCallback(() => {
+    window.clearTimeout(peekTimer.current);
+    setCollapsed(true);
+    setPeeking(false);
+    // 桌面宠物模式：在当前位置缩回小人；否则收成屏幕右缘的把手。
+    const state = petDraggedRef.current ? "pet-collapse" : "handle";
+    command("dock_collapse", { state }).catch(() => undefined);
+  }, []);
+
+  const exitCollapse = React.useCallback(() => {
+    window.clearTimeout(peekTimer.current);
+    setCollapsed(false);
+    setPeeking(false);
+    setPetDragged(false); // 退出收起＝回到正常贴靠，离开桌面宠物模式
+    command("dock_collapse", { state: "normal" }).catch(() => undefined);
+  }, []);
+
+  // 桌面宠物：点击小人在当前位置就地展开完整浮窗（仍是自由位置，不跳回贴终端）。
+  const petExpand = React.useCallback(() => {
+    window.clearTimeout(peekTimer.current);
+    setCollapsed(false);
+    setPeeking(false);
+    command("dock_collapse", { state: "pet-expand" }).catch(() => undefined);
+  }, []);
+
+  // 桌面宠物右键菜单的「去一边」：回到屏幕右缘、探出半身的小人。
+  const goEdge = React.useCallback(() => {
+    window.clearTimeout(peekTimer.current);
+    setPetDragged(false);
+    setCollapsed(true);
+    setPeeking(false);
+    command("dock_collapse", { state: "handle" }).catch(() => undefined);
+  }, []);
+
+  const peekStart = React.useCallback(() => {
+    if (!collapsedRef.current) return;
+    window.clearTimeout(peekTimer.current);
+    setPeeking(true);
+    command("dock_collapse", { state: "peek" }).catch(() => undefined);
+  }, []);
+
+  const peekEnd = React.useCallback(() => {
+    if (!collapsedRef.current) return;
+    // 留一点延迟，避免缩放越界时鼠标瞬时离开导致闪烁。
+    window.clearTimeout(peekTimer.current);
+    peekTimer.current = window.setTimeout(() => {
+      setPeeking(false);
+      command("dock_collapse", { state: "handle" }).catch(() => undefined);
+    }, 180);
+  }, []);
+
   const copyTimer = React.useRef<number | undefined>(undefined);
   async function copy(item: CapturedQuestion) {
     const imageOnly = item.image_path && (!item.text || item.text === IMAGE_MARKER);
@@ -390,27 +596,203 @@ function Dock() {
     copyTimer.current = window.setTimeout(() => setCopiedId(null), 1400);
   }
 
-  // 按天分组：插入日期分隔，并标出最新一条（节点会跳动）
+  // 时间线最新一条会跳动（光标感）
+  const newestId = questions[0]?.id;
+  const renderEntry = (q: CapturedQuestion) => (
+    <article key={q.id} className={`entry ${q.id === newestId ? "latest" : ""}`} data-src={q.source}>
+      <div className="node" />
+      <button className={`copy ${copiedId === q.id ? "done" : ""}`} type="button" title="复制" onClick={() => copy(q)}>
+        {copiedId === q.id ? <Check size={13} /> : <Copy size={13} />}
+      </button>
+      <div className="meta">
+        <span className="src">{sourceLabel(q.source)}</span>
+        <span className="dot" />
+        <span>{timeLabel(q.asked_at)}</span>
+      </div>
+      {q.text && q.text !== IMAGE_MARKER ? <div className="body">{q.text}</div> : null}
+      {q.image_path ? (
+        <div className="qImgs">
+          {q.image_path.split("\n").filter(Boolean).map((p, i) => (
+            <img
+              key={i}
+              className="qImg"
+              src={imageSrc(p)}
+              alt="图片"
+              loading="lazy"
+              onClick={() => setLightbox(imageSrc(p))}
+            />
+          ))}
+        </div>
+      ) : q.text === IMAGE_MARKER ? (
+        <div className="body muted">{IMAGE_MARKER}</div>
+      ) : null}
+    </article>
+  );
+
+  // 按天分组（单项目时用）：插入日期分隔
   let prevDay = "";
-  const rows = questions.map((q, index) => {
+  const rows = questions.map((q) => {
     const day = dayLabel(q.asked_at);
     const showMark = day !== prevDay;
     prevDay = day;
-    return { q, latest: index === 0, day, showMark };
+    return { q, day, showMark };
   });
 
+  // 同一窗口里出现多个项目目录（常见于 iTerm2/Otty 等自绘 tab 终端的多 tab）→ 按项目分组。
+  // questions 已按 asked_at 倒序，组按"组内最新一条"先后排列（最近用的项目在上）。
+  const groups: { key: string; cwd: string | null; items: CapturedQuestion[] }[] = [];
+  for (const q of questions) {
+    const key = q.cwd ?? "";
+    let g = groups.find((x) => x.key === key);
+    if (!g) {
+      g = { key, cwd: q.cwd, items: [] };
+      groups.push(g);
+    }
+    g.items.push(q);
+  }
+  // 当前窗口属于原生 tab 终端（Ghostty/Terminal）还是自绘 tab 终端（iTerm2/Otty…），
+  // 分别由对应开关决定是否按项目分组。
+  const isNativeTab = !!appName && NATIVE_TAB_TERMINALS.includes(appName);
+  const groupingOn = isNativeTab ? prefs.group_native_windows : prefs.group_drawn_tabs;
+  const multiProject = groupingOn && groups.length > 1;
+
+  const clickExpand = prefs.notch_expand === "click";
+  // 当前选中的边缘小人（off 或找不到 → 退回细握把）。
+  const currentPet =
+    prefs.notch_mascot && prefs.notch_mascot !== "off"
+      ? pets.find((p) => p.id === prefs.notch_mascot) ?? null
+      : null;
+
+  // 收起并显示小人时，连 html/body 一起透明（原生窗口已透明，但根元素背景是主题色会盖住）。
+  React.useEffect(() => {
+    const root = document.documentElement;
+    if (collapsed && !peeking && currentPet) root.setAttribute("data-petnotch", "1");
+    else root.removeAttribute("data-petnotch");
+    return () => root.removeAttribute("data-petnotch");
+  }, [collapsed, peeking, currentPet]);
+
+  // 空闲小动作：小人显示时，每隔一会儿随机蹦一下/招手/张望，播完回到待机。
+  React.useEffect(() => {
+    if (!collapsed || !currentPet) return;
+    let alive = true;
+    let timer: number | undefined;
+    // 桌面完整态：蹦/招手/张望全有；右缘半身态只侧脸招手（露脸自然，不会露半张正脸）。
+    const acts = petDragged ? ["jumping", "waving", "waiting"] : ["waving"];
+    const dur: Record<string, number> = { jumping: 900, waving: 1300, waiting: 1100 };
+    const loop = () => {
+      timer = window.setTimeout(() => {
+        if (!alive) return;
+        const a = acts[Math.floor(Math.random() * acts.length)];
+        setPetAction(a);
+        timer = window.setTimeout(() => {
+          if (!alive) return;
+          setPetAction("idle");
+          loop();
+        }, dur[a] ?? 1000);
+      }, 7000 + Math.random() * 9000);
+    };
+    loop();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+      setPetAction("idle");
+    };
+  }, [collapsed, currentPet, petDragged]);
+
+  // 收起且未展开：屏幕右缘显示小人/把手。
+  // 细握把：沿用 notch_expand（悬停滑出 / 点击展开）。
+  // 小人：统一为「按住拖动可移到桌面任意处 · 点击展开」（hover 滑出会和拖动冲突，故不用）。
+  if (collapsed && !peeking) {
+    const petFree = !!currentPet && petDragged; // 已拖到桌面＝完整显示、点击就地展开
+    const onPetDown = (e: React.PointerEvent) => {
+      holdingPet.current = true;
+      petDragMoved.current = false;
+      petStart.current = { x: e.screenX, y: e.screenY };
+    };
+    const onPetMove = (e: React.PointerEvent) => {
+      if (!holdingPet.current || petDragMoved.current) return;
+      if (Math.abs(e.screenX - petStart.current.x) > 4 || Math.abs(e.screenY - petStart.current.y) > 4) {
+        petDragMoved.current = true; // 超过阈值＝拖动，启动系统拖窗
+        if (isTauriRuntime()) getCurrentWindow().startDragging().catch(() => undefined);
+      }
+    };
+    const onPetClick = () => {
+      if (petDragMoved.current) { petDragMoved.current = false; return; } // 刚拖动，不当点击
+      if (petFree) petExpand(); // 桌面：就地展开
+      else exitCollapse(); // 右缘：还原成正常贴靠的完整 dock
+    };
+    // 关闭菜单并把临时增高的窗口缩回小人。
+    const closeMenu = () => {
+      setPetMenu(false);
+      command("dock_collapse", { state: "pet-menu-end" }).catch(() => undefined);
+    };
+    return (
+      <div
+        className={`notchRoot ${petMenu ? "menuing" : ""}`}
+        onMouseEnter={!currentPet && !clickExpand ? peekStart : undefined}
+        onClick={!currentPet && clickExpand ? exitCollapse : undefined}
+        title={currentPet ? "拖动可移到桌面 · 点击展开 · 右键更多" : clickExpand ? "点击展开 AskDock" : "移上来展开 AskDock"}
+      >
+        {currentPet ? (
+          <>
+            <div
+              className={`petStage ${petFree ? "free" : ""}`}
+              data-greet={greet ? "1" : undefined}
+              onPointerDown={onPetDown}
+              onPointerMove={onPetMove}
+              onClick={onPetClick}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setPetMenu(true);
+                command("dock_collapse", { state: "pet-menu" }).catch(() => undefined);
+              }}
+            >
+              <PetSprite sheet={currentPet.spritesheet} state={greet ? "waving" : petAction} />
+            </div>
+            {petMenu ? (
+              <div className="petMenu" onMouseLeave={closeMenu}>
+                {/* 去/展开/贴靠 三项自带尺寸切换，不必再 pet-menu-end */}
+                <button type="button" onClick={() => { setPetMenu(false); goEdge(); }}>去屏幕右缘</button>
+                <button type="button" onClick={() => { setPetMenu(false); petExpand(); }}>展开列表</button>
+                <button type="button" onClick={() => { setPetMenu(false); exitCollapse(); }}>贴靠终端</button>
+                <div className="petMenuSep" />
+                <button type="button" onClick={() => { closeMenu(); command("open_settings").catch(() => undefined); }}>设置…</button>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <div className="notchHandle"><span className="grip" /></div>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <main className="dock">
+    <main
+      className="dock"
+      onMouseEnter={collapsed && !clickExpand ? peekStart : undefined}
+      onMouseLeave={collapsed && !clickExpand ? peekEnd : undefined}
+    >
       <header className="titlebar" data-tauri-drag-region onPointerDown={() => { holdingTitle.current = true; }}>
         <span className="brand">AskDock</span>
         <button
           className={`ic ${freeMode ? "" : "live"}`}
           type="button"
-          onClick={() => setFreeMode((v) => !v)}
+          onClick={() => setFreeMode((v) => { const nv = !v; if (!nv) setPetDragged(false); return nv; })}
           title={freeMode ? "自由位置 · 点击重新贴靠终端" : "实时贴靠中 · 点击解锁后可拖动标题栏移动"}
         >
           <Zap size={15} />
         </button>
+        {isTauriRuntime() ? (
+          <button
+            className="ic"
+            type="button"
+            onClick={collapsed ? exitCollapse : enterCollapse}
+            title={collapsed ? "退出收起" : "收起到屏幕右缘（移上来展开）"}
+          >
+            {collapsed ? <PanelRightOpen size={15} /> : <PanelRightClose size={15} />}
+          </button>
+        ) : null}
         <button className="ic" type="button" onClick={hideWindow} title="关闭（点托盘图标可重新打开）">
           <X size={15} />
         </button>
@@ -429,40 +811,24 @@ function Dock() {
           <div className="streamEmpty">
             在终端里问 Claude / Codex，<br />提问会顺着时间线出现在这里
           </div>
+        ) : multiProject ? (
+          groups.map((g) => (
+            <section className="projGroup" key={g.key}>
+              <div className="projmark">
+                <Folder size={11} />
+                <span title={g.cwd ?? undefined}>{projectLabel(g.cwd)}</span>
+                <div className="rule" />
+              </div>
+              {g.items.map((q) => renderEntry(q))}
+            </section>
+          ))
         ) : (
-          rows.map(({ q, latest, day, showMark }) => (
+          rows.map(({ q, day, showMark }) => (
             <React.Fragment key={q.id}>
               {showMark ? (
                 <div className="daymark"><span>{day}</span><div className="rule" /></div>
               ) : null}
-              <article className={`entry ${latest ? "latest" : ""}`} data-src={q.source}>
-                <div className="node" />
-                <button className={`copy ${copiedId === q.id ? "done" : ""}`} type="button" title="复制" onClick={() => copy(q)}>
-                  {copiedId === q.id ? <Check size={13} /> : <Copy size={13} />}
-                </button>
-                <div className="meta">
-                  <span className="src">{sourceLabel(q.source)}</span>
-                  <span className="dot" />
-                  <span>{timeLabel(q.asked_at)}</span>
-                </div>
-                {q.text && q.text !== IMAGE_MARKER ? <div className="body">{q.text}</div> : null}
-                {q.image_path ? (
-                  <div className="qImgs">
-                    {q.image_path.split("\n").filter(Boolean).map((p, i) => (
-                      <img
-                        key={i}
-                        className="qImg"
-                        src={imageSrc(p)}
-                        alt="图片"
-                        loading="lazy"
-                        onClick={() => setLightbox(imageSrc(p))}
-                      />
-                    ))}
-                  </div>
-                ) : q.text === IMAGE_MARKER ? (
-                  <div className="body muted">{IMAGE_MARKER}</div>
-                ) : null}
-              </article>
+              {renderEntry(q)}
             </React.Fragment>
           ))
         )}
@@ -554,9 +920,24 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
 function SettingsPage() {
   const [prefs, setPrefs] = React.useState<Prefs>(initialPrefs);
   const [cat, setCat] = React.useState("appearance");
+  const [purging, setPurging] = React.useState(false);
+  const [purgeMsg, setPurgeMsg] = React.useState("");
+  const [confirmPurge, setConfirmPurge] = React.useState(false);
+  const [pets, setPets] = React.useState<PetInfo[]>([]);
   const saveTimer = React.useRef<number | undefined>(undefined);
 
   useApplyAppearance(prefs);
+
+  const loadPets = React.useCallback(async () => {
+    try {
+      setPets(await command<PetInfo[]>("list_pets"));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  React.useEffect(() => {
+    loadPets();
+  }, [loadPets]);
 
   React.useEffect(() => {
     (async () => {
@@ -585,12 +966,43 @@ function SettingsPage() {
           side: next.attach_side,
           width: next.dock_width,
           height: next.dock_height,
-          follow: next.follow
+          follow: next.follow,
+          groupDrawnTabs: next.group_drawn_tabs,
+          groupNativeWindows: next.group_native_windows,
+          notchExpand: next.notch_expand,
+          notchMascot: next.notch_mascot
         }).catch(() => undefined);
       }, 200);
       return next;
     });
   }, []);
+
+  const runPurge = React.useCallback(async () => {
+    setConfirmPurge(false);
+    setPurging(true);
+    setPurgeMsg("");
+    try {
+      const stats = await command<{ rows: number; images: number }>("purge_cache_now");
+      setPurgeMsg(
+        stats.rows || stats.images
+          ? `已清理 ${stats.rows} 条记录、${stats.images} 张图片`
+          : "没有可清理的内容"
+      );
+    } catch {
+      setPurgeMsg("清理失败，请重试");
+    } finally {
+      setPurging(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!confirmPurge) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmPurge(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmPurge]);
 
   const isScreen = prefs.dock_mode === "screen";
   const widthAuto = !isScreen && prefs.follow && (prefs.attach_side === "top" || prefs.attach_side === "bottom");
@@ -674,6 +1086,65 @@ function SettingsPage() {
               <div className="prefsRow">
                 <span>左下 / 右下</span>
                 <span className="cornerPair">{cornerInput(2)}{cornerInput(3)}</span>
+              </div>
+            </div>
+
+            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>按项目分组</div>
+            <div className="prefsHint">同一窗口里出现多个工作目录时，把提问按项目分组显示。</div>
+            <div className="prefsCard">
+              <div className="prefsRow">
+                <span>自绘 tab 终端<br /><i className="rowSub">iTerm2 / Otty / Warp 等，多 tab 挤一个窗口</i></span>
+                <Segmented value={prefs.group_drawn_tabs ? "on" : "off"} onChange={(v) => update({ group_drawn_tabs: v === "on" })} options={[["on", "开"], ["off", "关"]]} />
+              </div>
+              <div className="prefsRow">
+                <span>原生 tab 终端<br /><i className="rowSub">Ghostty / 终端，每 tab 即独立窗口</i></span>
+                <Segmented value={prefs.group_native_windows ? "on" : "off"} onChange={(v) => update({ group_native_windows: v === "on" })} options={[["on", "开"], ["off", "关"]]} />
+              </div>
+            </div>
+
+            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>收起到边缘</div>
+            <div className="prefsHint">点标题栏的收起按钮把浮窗收成屏幕右缘的小把手，收起后这样展开：</div>
+            <div className="prefsCard">
+              <div className="prefsRow">
+                <span>展开方式<br /><i className="rowSub">悬停：移上去临时滑出、移开收回；点击：点一下展开成正常浮窗</i></span>
+                <Segmented value={prefs.notch_expand === "click" ? "click" : "hover"} onChange={(v) => update({ notch_expand: v })} options={[["hover", "悬停"], ["click", "点击"]]} />
+              </div>
+              <div className="prefsRow petRow">
+                <span>边缘小人<br /><i className="rowSub">收起时扒在屏幕右缘看着你，抓到新提问会挥手</i></span>
+              </div>
+              <div className="petPicker">
+                <button
+                  type="button"
+                  className={`petChoice ${prefs.notch_mascot === "off" ? "on" : ""}`}
+                  onClick={() => update({ notch_mascot: "off" })}
+                  title="不要小人，只显示一根细握把"
+                >
+                  <span className="petChoiceArt"><span className="grip" /></span>
+                  <span className="petChoiceName">细握把</span>
+                </button>
+                {pets.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`petChoice ${prefs.notch_mascot === p.id ? "on" : ""}`}
+                    onClick={() => update({ notch_mascot: p.id })}
+                    title={p.description || p.display_name}
+                  >
+                    <span className="petChoiceArt">
+                      <PetSprite sheet={p.spritesheet} state="idle" displayH={66} />
+                    </span>
+                    <span className="petChoiceName">{p.display_name}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="petActions">
+                <button type="button" className="petBtn" onClick={() => command("open_pets_dir").catch(() => undefined)}>
+                  <Folder size={13} /> 打开宠物文件夹
+                </button>
+                <button type="button" className="petBtn ghost" onClick={loadPets}>刷新</button>
+              </div>
+              <div className="prefsHint petGalleryHint">
+                沿用 Codex Pets 格式：把社区做好的小人（一个含 <code>pet.json</code> + 精灵图的文件夹）拖进该目录，点刷新即可选用。
               </div>
             </div>
           </>
@@ -782,6 +1253,15 @@ function SettingsPage() {
                   <i>天</i>
                 </span>
               </div>
+              <div className="prefsRow">
+                <span>手动清理</span>
+                <span className="purgeAction">
+                  {purgeMsg && <i className="purgeMsg">{purgeMsg}</i>}
+                  <button type="button" className="prefsBtn" onClick={() => setConfirmPurge(true)} disabled={purging}>
+                    {purging ? "清理中…" : "立即清理"}
+                  </button>
+                </span>
+              </div>
             </div>
           </>
         )}
@@ -800,6 +1280,27 @@ function SettingsPage() {
           </>
         )}
       </div>
+
+      {confirmPurge && (
+        <div className="confirmOverlay" onClick={() => setConfirmPurge(false)}>
+          <div className="confirmCard" onClick={(e) => e.stopPropagation()}>
+            <div className="confirmTitle">确认清理</div>
+            <p className="confirmBody">
+              {(Number(prefs.retention_days) || 0) > 0
+                ? `将删除 ${Number(prefs.retention_days)} 天前的会话记录，并清理无引用的图片。此操作不可撤销。`
+                : "保留天数为 0（永久保留），将仅清理无引用的图片。此操作不可撤销。"}
+            </p>
+            <div className="confirmActions">
+              <button type="button" className="prefsBtn" onClick={() => setConfirmPurge(false)}>
+                取消
+              </button>
+              <button type="button" className="prefsBtn danger" onClick={runPurge}>
+                确认清理
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -40,6 +40,12 @@ struct FrontStatus {
 
 /// 用户偏好（外观 + 贴靠），存在 settings 表，两个窗口共享。
 #[derive(Debug, Serialize)]
+struct PurgeStats {
+    rows: usize,
+    images: usize,
+}
+
+#[derive(Debug, Serialize)]
 struct Prefs {
     theme: String,
     font_face: String,
@@ -53,6 +59,20 @@ struct Prefs {
     dock_width: i32,
     dock_height: i32,
     follow: bool,
+    group_drawn_tabs: bool,
+    group_native_windows: bool,
+    notch_expand: String,
+    notch_mascot: String,
+}
+
+/// 一只边缘小人（Codex Pets 格式）：pet.json + 精灵图。
+#[derive(Debug, Serialize)]
+struct PetInfo {
+    id: String,
+    display_name: String,
+    description: String,
+    /// 精灵图绝对路径，前端用 convertFileSrc 走 asset 协议加载（$APPDATA 已在白名单内）。
+    spritesheet: String,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +109,27 @@ struct ParsedQuestion {
 /// 纯图片消息的占位文本（清理后无文字时用它，避免丢掉这条）。
 const IMAGE_MARKER: &str = "🖼 图片";
 
+// 刘海式收起：把手的尺寸（贴屏幕右缘、纵向居中的小竖条）。
+const NOTCH_HANDLE_W: i32 = 14;
+const NOTCH_HANDLE_H: i32 = 120;
+
+// 收起时若选了边缘小人（mascot），把手放大到能放下一只精灵的小窗口。
+// 前端 PetSprite 的显示尺寸需与之大致吻合（见 main.tsx 的 PET_DISPLAY_H）。
+const NOTCH_MASCOT_W: i32 = 120;
+const NOTCH_MASCOT_H: i32 = 172;
+// 右键小人时窗口临时增高，把菜单显示在小人下方（不盖住小人）。
+const PET_MENU_H: i32 = 176;
+
+// 内置默认小人“小芽”：精灵图随二进制内嵌，首启写入 $APPDATA/pets/sprout/。
+const SPROUT_SPRITESHEET: &[u8] = include_bytes!("../assets/pets/sprout.png");
+const SPROUT_PET_JSON: &str = r#"{
+  "id": "sprout",
+  "displayName": "小芽",
+  "description": "AskDock 内置的小芽，收起时扒在屏幕边看着你。",
+  "spritesheetPath": "spritesheet.png"
+}
+"#;
+
 const TERMINAL_APP_NAMES: &[&str] = &[
     "Terminal",
     "iTerm",
@@ -110,6 +151,7 @@ pub fn run() {
         .setup(|app| {
             let db = init_database(&app.handle())?;
             app.manage(Db(Mutex::new(db)));
+            ensure_default_pet(&app.handle());
             setup_tray(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_position(PhysicalPosition::new(80, 80))?;
@@ -143,8 +185,12 @@ pub fn run() {
             get_window_questions,
             delete_question,
             clear_window,
+            purge_cache_now,
+            dock_collapse,
             get_prefs,
             set_prefs,
+            list_pets,
+            open_pets_dir,
             open_settings,
             show_main_window,
             hide_main_window
@@ -334,6 +380,19 @@ fn clear_window(db: State<'_, Db>, window_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 立即按当前保留天数清一次缓存（用户在设置里手动点「立即清理」）。
+#[tauri::command]
+fn purge_cache_now(app: AppHandle, db: State<'_, Db>) -> Result<PurgeStats, String> {
+    let stats = {
+        let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
+        let days = get_i32_setting(&conn, "retention_days", 3);
+        purge_cache(&app, &conn, days)
+    };
+    // 清掉过期记录后让浮窗刷新列表。
+    let _ = app.emit("questions-updated", ());
+    Ok(stats)
+}
+
 #[tauri::command]
 fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
     let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
@@ -354,6 +413,13 @@ fn get_prefs(db: State<'_, Db>) -> Result<Prefs, String> {
         dock_width: get_i32_setting(&conn, "dock_width", 360),
         dock_height: get_i32_setting(&conn, "dock_height", 620),
         follow: get_i32_setting(&conn, "follow_terminal", 1) != 0,
+        // 自绘 tab 终端（多 tab 挤一个窗口）默认按项目分组；原生 tab / 真窗口默认不分组。
+        group_drawn_tabs: get_i32_setting(&conn, "group_drawn_tabs", 1) != 0,
+        group_native_windows: get_i32_setting(&conn, "group_native_windows", 0) != 0,
+        // 刘海收起后把手的展开方式：hover(悬停滑出) / click(点击展开)。
+        notch_expand: get_str_setting(&conn, "notch_expand", "hover"),
+        // 收起把手上的边缘小人：off(细握把) 或某只 pet 的 id，默认内置“小芽”。
+        notch_mascot: get_str_setting(&conn, "notch_mascot", "sprout"),
     })
 }
 
@@ -375,6 +441,10 @@ fn set_prefs(
     width: i32,
     height: i32,
     follow: bool,
+    group_drawn_tabs: bool,
+    group_native_windows: bool,
+    notch_expand: String,
+    notch_mascot: String,
 ) -> Result<(), String> {
     let mode = if mode == "screen" { "screen" } else { "terminal" }.to_string();
     let glass = match glass.as_str() {
@@ -396,6 +466,16 @@ fn set_prefs(
     };
     let width = width.clamp(180, 900);
     let height = height.clamp(120, 1600);
+    let notch_expand = if notch_expand == "click" { "click" } else { "hover" }.to_string();
+    // 小人 id 只允许 [a-z0-9_-]，空/非法 → off（细握把）。
+    let notch_mascot = {
+        let s: String = notch_mascot
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        if s.is_empty() { "off".to_string() } else { s }
+    };
     {
         let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
         set_setting(&conn, "theme", &theme)?;
@@ -410,6 +490,14 @@ fn set_prefs(
         set_setting(&conn, "dock_width", &width.to_string())?;
         set_setting(&conn, "dock_height", &height.to_string())?;
         set_setting(&conn, "follow_terminal", if follow { "1" } else { "0" })?;
+        set_setting(&conn, "group_drawn_tabs", if group_drawn_tabs { "1" } else { "0" })?;
+        set_setting(
+            &conn,
+            "group_native_windows",
+            if group_native_windows { "1" } else { "0" },
+        )?;
+        set_setting(&conn, "notch_expand", &notch_expand)?;
+        set_setting(&conn, "notch_mascot", &notch_mascot)?;
     }
     // 改了保留天数 → 立即清理一次
     if let Ok(conn) = db.0.lock() {
@@ -421,6 +509,110 @@ fn set_prefs(
     let terminal = detect_front_terminal().ok().flatten().map(|win| win.rect);
     let _ = reposition_dock(&app, &db, terminal);
     let _ = app.emit("prefs-changed", ());
+    Ok(())
+}
+
+/// $APPDATA/pets 目录：每只边缘小人一个子目录（pet.json + 精灵图）。
+fn pets_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("pets");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+/// 首启把内置“小芽”落到 $APPDATA/pets/sprout/（精灵图存在则不覆盖，pet.json 始终刷新）。
+fn ensure_default_pet(app: &AppHandle) {
+    let Ok(base) = pets_dir(app) else { return };
+    let dir = base.join("sprout");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // 内置资源随版本更新 → 始终覆盖（用户想改应另建 pet，不要动内置 sprout）。
+    let _ = fs::write(dir.join("spritesheet.png"), SPROUT_SPRITESHEET);
+    let _ = fs::write(dir.join("pet.json"), SPROUT_PET_JSON);
+}
+
+/// 列出 $APPDATA/pets 下所有合法小人（pet.json 可解析且精灵图存在）。
+/// 沿用 Codex Pets 的清单字段，所以社区现成宠物拖进来即可用。
+#[tauri::command]
+fn list_pets(app: AppHandle) -> Result<Vec<PetInfo>, String> {
+    let base = pets_dir(&app)?;
+    let mut pets: Vec<PetInfo> = Vec::new();
+    let Ok(entries) = fs::read_dir(&base) else {
+        return Ok(pets);
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(dir.join("pet.json")) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let folder = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let id = json
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&folder)
+            .to_string();
+        let display_name = json
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        let description = json
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sprite_rel = json
+            .get("spritesheetPath")
+            .and_then(|v| v.as_str())
+            .unwrap_or("spritesheet.webp");
+        let sprite = dir.join(sprite_rel);
+        if !sprite.exists() {
+            continue;
+        }
+        pets.push(PetInfo {
+            id,
+            display_name,
+            description,
+            spritesheet: sprite.to_string_lossy().to_string(),
+        });
+    }
+    // 内置“小芽”排最前，其余按显示名排序。
+    pets.sort_by(|a, b| {
+        let rank = |p: &PetInfo| u8::from(p.id != "sprout");
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    Ok(pets)
+}
+
+/// 在访达里打开 pets 目录，方便用户把社区小人（pet.json + 精灵图）拖进去。
+#[tauri::command]
+fn open_pets_dir(app: AppHandle) -> Result<(), String> {
+    let dir = pets_dir(&app)?;
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -604,6 +796,153 @@ fn reposition_dock(app: &AppHandle, db: &State<'_, Db>, terminal: Option<Rect>) 
     Ok(())
 }
 
+/// 按当前主题/玻璃设置恢复窗口表面（背景色 + vibrancy）。收起小人时会临时设透明，
+/// 退出（normal）或滑出（peek）时用它还原，避免“小人装在不透明卡片里”的盒子感。
+fn apply_window_surface(window: &tauri::WebviewWindow, conn: &Connection) {
+    let theme = get_str_setting(conn, "theme", "linen");
+    let glass_mode = get_str_setting(conn, "glass", "off");
+    let radius = radius_max(&get_str_setting(conn, "corner_radius", "0,0,0,0"));
+    let bg = if glass_mode == "off" {
+        theme_bg(&theme)
+    } else {
+        tauri::window::Color(0, 0, 0, 0)
+    };
+    let _ = window.set_background_color(Some(bg));
+    apply_glass(window, &glass_mode, radius);
+}
+
+/// 刘海式收起浮窗。`state`：
+/// - `"handle"`：收成屏幕右缘纵向居中的小把手（选了小人时透明、放大）；
+/// - `"peek"`：悬停时滑出全尺寸浮窗（仍贴右缘）；
+/// - `"normal"`：退出收起，恢复正常贴靠。
+#[tauri::command]
+fn dock_collapse(app: AppHandle, db: State<'_, Db>, state: String) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+
+    if state == "normal" {
+        // 恢复配置里的最小尺寸下限 + 正常窗口背景，再按正常逻辑重新贴靠。
+        let _ = window.set_min_size(Some(PhysicalSize::new(240u32, 480u32)));
+        if let Ok(conn) = db.0.lock() {
+            apply_window_surface(&window, &conn);
+        }
+        let terminal = detect_front_terminal().ok().flatten().map(|win| win.rect);
+        return reposition_dock(&app, &db, terminal);
+    }
+
+    // 桌面宠物模式（小人在桌面任意位置）下，在「当前窗口位置」就地变换，不钉屏幕右缘：
+    // pet-expand=就地展开完整浮窗；pet-collapse=缩回小人；
+    // pet-menu=临时增高、在小人下方腾出右键菜单的位置；pet-menu-end=菜单关闭后缩回小人。
+    if matches!(
+        state.as_str(),
+        "pet-expand" | "pet-collapse" | "pet-menu" | "pet-menu-end"
+    ) {
+        let cur = window.outer_position().map_err(|error| error.to_string())?;
+        let (w, h) = match state.as_str() {
+            "pet-expand" => {
+                let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
+                apply_window_surface(&window, &conn); // 恢复不透明背景
+                let _ = window.set_min_size(Some(PhysicalSize::new(240u32, 480u32)));
+                (
+                    get_i32_setting(&conn, "dock_width", 360),
+                    get_i32_setting(&conn, "dock_height", 620),
+                )
+            }
+            "pet-menu" => {
+                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                let _ = window.set_min_size(Some(PhysicalSize::new(
+                    NOTCH_MASCOT_W as u32,
+                    NOTCH_MASCOT_H as u32,
+                )));
+                (NOTCH_MASCOT_W, NOTCH_MASCOT_H + PET_MENU_H)
+            }
+            _ => {
+                // pet-collapse | pet-menu-end：缩回小人尺寸，透明背景
+                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                let _ = window.set_min_size(Some(PhysicalSize::new(
+                    NOTCH_MASCOT_W as u32,
+                    NOTCH_MASCOT_H as u32,
+                )));
+                (NOTCH_MASCOT_W, NOTCH_MASCOT_H)
+            }
+        };
+        // 保持当前左上角，按当前显示器把新尺寸 clamp 进屏幕内。
+        let (mut x, mut y) = (cur.x, cur.y);
+        if let Some(m) = window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.primary_monitor().ok().flatten())
+        {
+            let mp = m.position();
+            let ms = m.size();
+            x = x.clamp(mp.x, (mp.x + ms.width as i32 - w).max(mp.x));
+            y = y.clamp(mp.y, (mp.y + ms.height as i32 - h).max(mp.y));
+        }
+        // 先改尺寸再定位（clamp 后的左上角保证不越出屏幕）。
+        window
+            .set_size(PhysicalSize::new(w as u32, h as u32))
+            .map_err(|error| error.to_string())?;
+        window
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .ok_or_else(|| "无法读取显示器信息".to_string())?;
+    let pos = monitor.position();
+    let size = monitor.size();
+
+    let peek = state == "peek";
+    let (w, h) = if peek {
+        let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
+        // 从透明把手滑出完整浮窗：恢复正常背景。
+        apply_window_surface(&window, &conn);
+        (
+            get_i32_setting(&conn, "dock_width", 360),
+            get_i32_setting(&conn, "dock_height", 620),
+        )
+    } else {
+        let conn = db.0.lock().map_err(|_| "数据库繁忙".to_string())?;
+        // 选了边缘小人 → 把手放大到能放下精灵，且背景透明让小人像直接趴在屏幕边；
+        // 否则细握把：维持正常不透明背景。
+        let has_mascot = get_str_setting(&conn, "notch_mascot", "sprout") != "off";
+        if has_mascot {
+            let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+        } else {
+            apply_window_surface(&window, &conn);
+        }
+        let (hw, hh) = if has_mascot {
+            (NOTCH_MASCOT_W, NOTCH_MASCOT_H)
+        } else {
+            (NOTCH_HANDLE_W, NOTCH_HANDLE_H)
+        };
+        // 把手比配置里的 minWidth/minHeight 小，先放开最小尺寸下限。
+        let _ = window.set_min_size(Some(PhysicalSize::new(hw as u32, hh as u32)));
+        (hw, hh)
+    };
+
+    let x = pos.x + size.width as i32 - w; // 贴屏幕右缘
+    let y = pos.y + (size.height as i32 - h) / 2; // 纵向居中
+    let new_pos = PhysicalPosition::new(x, y);
+    let new_size = PhysicalSize::new(w as u32, h as u32);
+
+    // 放大（peek）先移位再变大、缩小（handle）先变小再移位，避免窗口越出屏幕右缘。
+    if peek {
+        window.set_position(new_pos).map_err(|e| e.to_string())?;
+        window.set_size(new_size).map_err(|e| e.to_string())?;
+    } else {
+        window.set_size(new_size).map_err(|e| e.to_string())?;
+        window.set_position(new_pos).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 固定屏幕边模式：把浮窗钉在屏幕指定边、沿该边居中。
 fn screen_edge_rect(screen: Rect, side: &str, width: i32, height: i32, gap: i32) -> Rect {
     let w = width.max(180);
@@ -704,6 +1043,11 @@ fn run_capture_loop(app: AppHandle) {
         }
     }
 
+    // 一次性回填：给历史 Codex 记录补上 cwd（这些行入库时还没存 cwd），消除"未归类"。
+    backfill_codex_cwd(&app);
+
+    // 缓存每个 Codex 会话文件的元数据（来源是否终端 + 会话 cwd），首次有新行时读一次。
+    let mut codex_meta: HashMap<PathBuf, CodexMeta> = HashMap::new();
     let mut purge_counter: u32 = 0;
     loop {
         // 每 ~1 小时清理一次过期缓存（首轮也清）。
@@ -722,7 +1066,29 @@ fn run_capture_loop(app: AppHandle) {
             let mut files = Vec::new();
             collect_jsonl(root, &mut files, 0);
             for file in files {
-                for parsed in read_new_questions(&file, &mut offsets, source) {
+                let mut parsed_list = read_new_questions(&file, &mut offsets, source);
+                if parsed_list.is_empty() {
+                    continue;
+                }
+                if source == "codex" {
+                    let meta = codex_meta
+                        .entry(file.clone())
+                        .or_insert_with(|| read_codex_meta(&file));
+                    // Codex 桌面 app / IDE 扩展的提问不属于任何终端窗口，丢弃它们，
+                    // 免得被错误归到捕获时恰好在前台的终端。
+                    if !meta.is_terminal {
+                        continue;
+                    }
+                    // 用会话 cwd 补上 Codex 的工作目录（前端据此按项目分组）。
+                    if let Some(cwd) = &meta.cwd {
+                        for p in &mut parsed_list {
+                            if p.cwd.is_none() {
+                                p.cwd = Some(cwd.clone());
+                            }
+                        }
+                    }
+                }
+                for parsed in parsed_list {
                     if store_question(&app, source, parsed) {
                         captured_any = true;
                     }
@@ -1038,6 +1404,114 @@ fn parse_codex_line(line: &str, session_id: Option<&str>) -> Option<ParsedQuesti
     })
 }
 
+/// Codex 会话是不是「在终端里跑」的。会话文件首行 `session_meta` 里带 `source`：
+/// `cli`(codex-tui)/`exec`(codex exec)是终端来源 → 捕获；`vscode` 等是
+/// Codex 桌面 app / IDE 扩展 → 不是在终端里问的，必须排除，否则它的提问会被
+/// 错误归到捕获那一刻恰好在前台的某个终端窗口。读不到/老格式则按终端处理（兼容）。
+/// Codex 会话文件首行 `session_meta` 里的两项信息：是否终端来源、会话工作目录。
+#[derive(Debug, Clone)]
+struct CodexMeta {
+    is_terminal: bool,
+    cwd: Option<String>,
+}
+
+fn read_codex_meta(path: &Path) -> CodexMeta {
+    use std::io::BufRead;
+    let Ok(file) = fs::File::open(path) else {
+        return CodexMeta { is_terminal: true, cwd: None };
+    };
+    let mut line = String::new();
+    if std::io::BufReader::new(file).read_line(&mut line).is_err() {
+        return CodexMeta { is_terminal: true, cwd: None };
+    }
+    parse_codex_meta(&line)
+}
+
+/// 从 `session_meta` 首行 JSON 解析（是否终端来源, cwd）。`source` 为 `cli`/`exec`
+/// 才是终端来源；读不到首行、首行不是 meta、或没有 `source` 字段（老格式）按终端处理。
+fn parse_codex_meta(line: &str) -> CodexMeta {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return CodexMeta { is_terminal: true, cwd: None };
+    };
+    if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return CodexMeta { is_terminal: true, cwd: None };
+    }
+    let payload = v.get("payload");
+    let is_terminal = match payload.and_then(|p| p.get("source")).and_then(|s| s.as_str()) {
+        Some(s) => s == "cli" || s == "exec",
+        None => true,
+    };
+    let cwd = payload
+        .and_then(|p| p.get("cwd"))
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+        .map(|c| c.to_string());
+    CodexMeta { is_terminal, cwd }
+}
+
+/// 一次性回填历史 Codex 记录的 cwd：早先入库的 Codex 提问没有 cwd（前端会把它们
+/// 归到"未归类"组）。每条记录都存了 `session_id`（= 会话文件名 stem），据此找回
+/// 会话文件、读出 `session_meta.cwd` 补写回去。找不到文件或文件里没 cwd 的保持 NULL。
+fn backfill_codex_cwd(app: &AppHandle) {
+    let Some(db) = app.try_state::<Db>() else {
+        return;
+    };
+    let Ok(conn) = db.0.lock() else {
+        return;
+    };
+
+    // 哪些会话还缺 cwd
+    let session_ids: Vec<String> = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT DISTINCT session_id FROM questions
+             WHERE source = 'codex' AND cwd IS NULL AND session_id IS NOT NULL",
+        ) else {
+            return;
+        };
+        let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+            return;
+        };
+        rows.flatten().collect()
+    };
+    if session_ids.is_empty() {
+        return;
+    }
+
+    // 建 文件名stem → 路径 映射
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let mut files = Vec::new();
+    collect_jsonl(&PathBuf::from(home).join(".codex/sessions"), &mut files, 0);
+    let by_stem: HashMap<String, PathBuf> = files
+        .into_iter()
+        .filter_map(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| (s.to_string(), p.clone()))
+        })
+        .collect();
+
+    let mut filled = 0usize;
+    for sid in session_ids {
+        if let Some(path) = by_stem.get(&sid) {
+            if let Some(cwd) = read_codex_meta(path).cwd {
+                filled += conn
+                    .execute(
+                        "UPDATE questions SET cwd = ?1
+                         WHERE source = 'codex' AND session_id = ?2 AND cwd IS NULL",
+                        params![cwd, sid],
+                    )
+                    .unwrap_or(0);
+            }
+        }
+    }
+    drop(conn);
+    if filled > 0 {
+        let _ = app.emit("questions-updated", ());
+    }
+}
+
 /// 从 Codex 的 `<image … path="…">` 里抽出所有文件路径（一条消息可能多张）。
 fn extract_codex_image_paths(raw: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -1073,19 +1547,22 @@ fn dedup_key(source: &str, uuid: Option<&str>, asked_at: &str, text: &str) -> St
 }
 
 /// 缓存清理：删掉超过保留天数的会话记录，并清掉 images 目录里没人引用的孤儿图片。
-/// retention_days <= 0 表示永久保留（只清孤儿图片）。
-fn purge_cache(app: &AppHandle, conn: &Connection, retention_days: i32) {
+/// retention_days <= 0 表示永久保留（只清孤儿图片）。返回本次清掉的记录数和图片数。
+fn purge_cache(app: &AppHandle, conn: &Connection, retention_days: i32) -> PurgeStats {
+    let mut rows = 0usize;
     if retention_days > 0 {
         let cutoff = (Utc::now() - chrono::Duration::days(retention_days as i64)).to_rfc3339();
-        let _ = conn.execute(
-            "DELETE FROM questions WHERE datetime(created_at) < datetime(?1)",
-            params![cutoff],
-        );
+        rows = conn
+            .execute(
+                "DELETE FROM questions WHERE datetime(created_at) < datetime(?1)",
+                params![cutoff],
+            )
+            .unwrap_or(0);
     }
 
     // 删掉 images 目录里不再被任何会话引用的图片文件（含用户手动删/清空留下的）。
     let Ok(dir) = app.path().app_data_dir().map(|d| d.join("images")) else {
-        return;
+        return PurgeStats { rows, images: 0 };
     };
     let used: std::collections::HashSet<String> = {
         let mut set = std::collections::HashSet::new();
@@ -1103,14 +1580,18 @@ fn purge_cache(app: &AppHandle, conn: &Connection, retention_days: i32) {
         }
         set
     };
+    let mut images = 0usize;
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() && !used.contains(&path.to_string_lossy().to_string()) {
-                let _ = fs::remove_file(&path);
+                if fs::remove_file(&path).is_ok() {
+                    images += 1;
+                }
             }
         }
     }
+    PurgeStats { rows, images }
 }
 
 /// 归类并入库；返回是否真的新插入了一条（去重命中则返回 false）。
@@ -1301,7 +1782,33 @@ fn detect_front_terminal() -> Result<Option<TerminalWindow>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{calculate_dock_rect, is_real_prompt, Rect};
+    use super::{calculate_dock_rect, is_real_prompt, parse_codex_meta, Rect};
+
+    #[test]
+    fn codex_terminal_sources_kept_gui_excluded() {
+        let meta = |source: &str| {
+            format!(r#"{{"type":"session_meta","payload":{{"id":"x","source":"{source}"}}}}"#)
+        };
+        // 终端来源 → 捕获
+        assert!(parse_codex_meta(&meta("cli")).is_terminal);
+        assert!(parse_codex_meta(&meta("exec")).is_terminal);
+        // Codex 桌面 app / IDE → 排除
+        assert!(!parse_codex_meta(&meta("vscode")).is_terminal);
+        // 老格式 / 异常 → 兼容地按终端处理
+        assert!(parse_codex_meta(r#"{"type":"session_meta","payload":{"id":"x"}}"#).is_terminal);
+        assert!(parse_codex_meta(r#"{"type":"response_item"}"#).is_terminal);
+        assert!(parse_codex_meta("not json").is_terminal);
+    }
+
+    #[test]
+    fn codex_meta_extracts_cwd() {
+        let line = r#"{"type":"session_meta","payload":{"source":"cli","cwd":"/Users/x/proj"}}"#;
+        assert_eq!(parse_codex_meta(line).cwd.as_deref(), Some("/Users/x/proj"));
+        // 没有 cwd / 空 cwd → None
+        let line2 = r#"{"type":"session_meta","payload":{"source":"cli","cwd":""}}"#;
+        assert_eq!(parse_codex_meta(line2).cwd, None);
+        assert_eq!(parse_codex_meta(r#"{"type":"session_meta","payload":{}}"#).cwd, None);
+    }
 
     #[test]
     fn attaches_to_right_following_terminal_height() {

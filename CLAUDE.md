@@ -82,6 +82,79 @@ records the window as the "last seen terminal" (for capture attribution). When t
 window's captured questions. It also listens for the backend's `questions-updated`
 Tauri **event** to refresh the list the instant a new question is captured.
 
+The dock list is a timeline grouped by **day** (`dayLabel`). But when one window's
+questions span **more than one working directory** (`cwd`) it can switch to grouping by
+**project** instead (`projectLabel` = the cwd's last path segment, `multiProject` flag in
+`Dock`). This is the mitigation for the tab caveat below: it can't follow tab switches
+(macOS exposes no signal for the active tab), but it keeps each project's prompts visually
+separated within a shared window list. Single-project windows keep the plain day timeline.
+
+Whether grouping kicks in is gated by **two prefs**, chosen by the current window's terminal
+type (`appName` vs `NATIVE_TAB_TERMINALS = Ghostty/Terminal`):
+- `group_drawn_tabs` (default **on**) — app-drawn-tab terminals (iTerm2/Otty/Warp…), where
+  every tab shares one CGWindowID, so one window legitimately mixes projects → grouping is
+  useful.
+- `group_native_windows` (default **off**) — native-tab terminals (Ghostty/Terminal), where
+  each tab is its own window/CGWindowID, so a window's multiple cwds are just one tab `cd`-ing
+  around → grouping is usually noise, off by default.
+Both are toggles in Settings → 外观 → 按项目分组, persisted via `set_prefs`/`get_prefs`.
+
+**Notch-style collapse** (titlebar `PanelRightClose` button): the dock can hide to a thin
+handle pinned at the **screen right edge** (notch-like), and slide out **on hover**. Driven
+by the `dock_collapse(state)` command — `"handle"` (shrink to a `NOTCH_HANDLE_W`×`H` bar at
+the right edge, vertically centered; temporarily relaxes the window's min-size below the
+config floor of 240×480), `"peek"` (grow to the full dock at the right edge — fired by the
+handle's `onMouseEnter`), `"normal"` (restore min-size + `reposition_dock` — fired by the
+exit button). Grow uses set-position-then-size, shrink uses size-then-position, to avoid
+overflowing the right edge. Frontend state: `collapsed`/`peeking` in `Dock`; while `collapsed`, the poll loop passes
+`reposition: false` so it doesn't fight the handle geometry. Collapse is **session-only**
+(not persisted) — restarting AskDock comes back expanded.
+
+The handle's **expand behavior** is a pref `notch_expand` (`hover`|`click`, default `hover`,
+Settings → 外观 → 收起到边缘):
+- `hover`: handle `onMouseEnter` → `peek` (temporary slide-out); dock `onMouseLeave` →
+  `peekEnd` (~180ms debounce to avoid flicker at the resize boundary) → back to handle.
+  `collapsed` stays true; the exit button restores the normal dock.
+- `click`: handle `onClick` directly exits collapse (→ full normal dock); there's no `peek`
+  state — it's a clean handle⇄dock toggle via the handle and the titlebar collapse button.
+
+### Edge mascot (desktop pet)
+
+The collapsed handle can show a **mascot** instead of the thin grip, reusing the **Codex
+Pets** spritesheet format. Pref `notch_mascot` (`off` = plain grip, or a pet id; default
+`sprout`), Settings → 外观 → 收起到边缘. Pets live in `$APPDATA/pets/<id>/` as `pet.json`
+(`id`/`displayName`/`description`/`spritesheetPath`) + a spritesheet; the built-in
+**小芽/sprout** is embedded (`include_bytes!`) and written there on first run by
+`ensure_default_pet` (regenerate via `tools/gen_sprout.py`). `list_pets` scans that dir and
+returns absolute spritesheet paths → frontend `convertFileSrc` (asset protocol, since
+`$APPDATA/**` is in scope); `open_pets_dir` opens it in Finder so community pets can be
+dropped in + 刷新. The sheet is a fixed **8 cols × 9 rows of 192×208 cells**; the 9 rows +
+per-frame timings are the universal `PET_ROWS` table in `main.tsx`, animated by `PetSprite`
+(a JS frame-ticker, not CSS `steps()`).
+
+Display & states (frontend `Dock`):
+- **Right-edge half-peek** (not dragged): `dock_collapse("handle")` sizes the window to
+  `NOTCH_MASCOT_W`×`H` at the right edge with a **transparent** background
+  (`set_background_color` + `data-petnotch` on `<html>` so html/body go transparent — else
+  the theme bg covers it; `apply_window_surface` restores the opaque surface on
+  `peek`/`normal`/`pet-expand`). CSS `translateX` pushes the mascot's right half off the
+  screen edge (clipped), leaving the left half + its 3/4-left-facing face peeking in.
+- **Desktop pet** (`petDragged` → `.free`): press-and-drag the mascot (pointer move > 4px →
+  `startDragging`; window `onMoved` sets `petDragged`+`freeMode`) to anywhere on the desktop,
+  shown full-body. Left-click → `pet-expand` (full dock in place); titlebar collapse →
+  `pet-collapse` (shrink back to the mascot in place); the Zap button (turning `freeMode`
+  off) leaves pet mode and re-attaches. `pet-expand`/`pet-collapse`/`pet-menu`/`pet-menu-end`
+  transform at the **current** window position (clamped on-screen), unlike `handle`/`peek`
+  which pin to the right edge. While in pet mode the poll loop passes `reposition: false`.
+- **Right-click menu**: `onContextMenu` → `setPetMenu` + `dock_collapse("pet-menu")` grows
+  the window down by `PET_MENU_H` so a self-drawn HTML menu (`.petMenu`) sits **below** the
+  mascot (去屏幕右缘 / 展开列表 / 贴靠终端 / 设置…); closing → `pet-menu-end` shrinks back.
+  (A native `popup_menu` was tried first but its click events didn't route back reliably.)
+- **Idle micro-actions**: while the mascot shows, every ~7–16s it randomly plays
+  jumping/waving/waiting then returns to idle (`petAction`); the right-edge half-peek uses
+  only `waving` (a front-facing pose would show half a face). A new captured question
+  (`questions-updated` while collapsed) plays `waving` (`greet`) for ~2.6s, taking priority.
+
 ### AI-question capture (the heart of the app)
 
 A background thread (`run_capture_loop`, spawned in `setup`) polls every ~800ms over the
@@ -89,6 +162,20 @@ AI tools' session transcripts and harvests new user prompts:
 
 - **Sources** (`capture_sources`): Claude Code `~/.claude/projects/**/*.jsonl` and Codex
   `~/.codex/sessions/**/*.jsonl`. Both are JSONL; add more sources here.
+- **Codex session meta** (`read_codex_meta` → `parse_codex_meta`, returns `CodexMeta {
+  is_terminal, cwd }`): a Codex session's first line is a `session_meta` whose
+  `payload.source` is `cli` (codex-tui), `exec` (codex exec), or `vscode` (**Codex Desktop /
+  IDE extension**), and whose `payload.cwd` is the session's working directory.
+  - *Terminal-only filter*: only terminal sources (`cli`/`exec`) are captured; `vscode`
+    sessions are skipped — their prompts aren't typed in a terminal, so the "frontmost
+    terminal window at capture time" attribution would wrongly pin them to whatever terminal
+    the user happened to switch back to (this caused Desktop questions to bleed into
+    Ghostty). Missing/old `source` field → treated as terminal (back-compat).
+  - *cwd backfill*: `parse_codex_line` itself yields `cwd: None` (the per-message rows have
+    no cwd), so the capture loop fills each Codex prompt's `cwd` from the session's
+    `session_meta.cwd`. Claude prompts already carry their own per-line `cwd`.
+  - Meta is read only for files that produced a new prompt, cached per-file in
+    `run_capture_loop` (`codex_meta`).
 - **Only going forward**: at startup, every existing file's read offset is set to its
   current EOF, so historical conversations are *not* imported. Each loop reads only newly
   appended **complete** lines (tracked per-file byte offset; a trailing partial line waits
@@ -129,9 +216,19 @@ created in `init_database`. Two tables: `questions` and `settings` (key/value).
   `purge_cache`'s orphan sweep splits too. A single-path value is just the 1-element case.
 - `get_window_questions(window_id)` returns that window's rows, newest `asked_at` first.
 
-> Caveat: CGWindowID distinguishes separate **windows**, not **tabs** within one Ghostty
-> window (tabs share one CGWindowID). Questions asked in different tabs of the same window
-> are grouped together.
+> Caveat — tabs depend on the terminal's tab implementation, not on AskDock:
+> - **Native macOS tabs** (NSWindow tabbing, e.g. **Ghostty**): each tab is its own
+>   `NSWindow` with its own CGWindowID (verified: 3 Ghostty tabs = winNums 1266/208/406, all
+>   with identical overlapping bounds; the non-active tabs are off-screen windows, only
+>   visible with `OnScreenOnly` dropped). Switching tabs changes the frontmost CGWindowID,
+>   so AskDock separates them automatically — same as separate windows.
+> - **App-drawn tabs** (WebKit/Electron-style wrappers, e.g. **Otty**, bundle
+>   `io.appmakes.otty`): the whole window is one `NSWindow` / one CGWindowID; the tabs are
+>   painted inside the web view, so macOS exposes no signal for "which tab is active"
+>   (verified: an Otty window with 4 tabs is a single winNum 223). AskDock cannot tell these
+>   tabs apart without reading terminal contents / Accessibility, which it deliberately
+>   avoids. Questions from all tabs of such a window are grouped together; the workaround is
+>   to use separate windows (Otty multi-window *is* distinguished: winNums 223 vs 1247).
 
 ### Terminal detection & attaching (macOS only)
 
