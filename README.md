@@ -3,7 +3,7 @@
 > 你问过的，都还在窗边。
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="AskDock — 按终端窗口归档的 AI 提问时间线" width="380">
+  <img src="docs/dock.jpg" alt="AskDock — 按终端窗口归档的 AI 提问时间线" width="360">
 </p>
 
 问迹（AskDock）是一个停在终端旁的 macOS 桌面浮窗：它**自动收集你在 Claude Code、Codex 里问 AI 的每一个问题**，按终端窗口归档。当你切回某个终端窗口，就能看到自己在这儿问过什么、做到哪了。
@@ -18,6 +18,12 @@
 - 🐾 **桌面宠物** —— 可收起成屏幕边缘的小人、拖到桌面任意处；复用 [Codex Pets](https://www.aimcp.info/en/codex-pets) 精灵图格式，社区宠物贴个链接即可一键安装
 - 🎨 **可定制** —— 多主题、字体、毛玻璃、圆角、贴靠方式
 - 🔒 **本地优先** —— 不读终端内容、不联网上传，数据只存在本地 SQLite
+
+## 截图
+
+| 设置 · 外观（主题下拉、按项目分组） | 关于 |
+| :---: | :---: |
+| <img src="docs/settings.jpg" width="380"> | <img src="docs/about.jpg" width="380"> |
 
 ## 平台
 
