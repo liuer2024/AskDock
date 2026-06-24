@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Check, Copy, Filter, Folder, Info, Palette, PanelRight, PanelRightClose, PanelRightOpen, Settings, Type, X, Zap } from "lucide-react";
+import { Cat, Check, Copy, Filter, Folder, Info, Palette, PanelRight, PanelRightClose, PanelRightOpen, Settings, Type, X, Zap } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -109,12 +109,36 @@ function petSheetSrc(path: string) {
   return isTauriRuntime() ? convertFileSrc(path) : path;
 }
 
+// 把用户粘的宠物链接规整成 raw 的 pet.json URL；裸 GitHub 仓库补 main 分支（再回退 master）。
+function normalizePetUrl(input: string): { petJsonUrl: string; tryMaster: boolean } {
+  let u = input.trim();
+  if (u.includes("github.com") && !u.includes("raw.githubusercontent.com")) {
+    u = u.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/").replace("/tree/", "/");
+  }
+  const rawPrefix = "raw.githubusercontent.com/";
+  if (u.includes(rawPrefix)) {
+    const segs = (u.split(rawPrefix)[1] || "").split("/").filter(Boolean);
+    if (segs.length === 2) u = `https://raw.githubusercontent.com/${segs[0]}/${segs[1]}/main/`; // 裸仓库 → 补分支
+  }
+  const petJsonUrl = /\.json($|\?)/.test(u) ? u : (u.endsWith("/") ? u : u + "/") + "pet.json";
+  return { petJsonUrl, tryMaster: petJsonUrl.includes("/main/") };
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+
 // 一只会动的小人：按所选动画行(state)用逐帧时序循环切帧（比纯 CSS steps() 更忠实）。
-function PetSprite({ sheet, state, displayH = PET_DISPLAY_H }: { sheet: string; state: string; displayH?: number }) {
+function PetSprite({ sheet, state, displayH = PET_DISPLAY_H, animate = true }: { sheet: string; state: string; displayH?: number; animate?: boolean }) {
   const row = PET_ROW_BY_NAME[state] ?? PET_ROW_BY_NAME.idle;
   const [frame, setFrame] = React.useState(0);
   React.useEffect(() => {
     setFrame(0);
+    if (!animate) return; // 静态：只显示第 0 帧（设置选择器里几十个缩略图不逐帧动画，省 CPU）
     let i = 0;
     let timer: number | undefined;
     const step = () => {
@@ -127,7 +151,7 @@ function PetSprite({ sheet, state, displayH = PET_DISPLAY_H }: { sheet: string; 
     };
     step();
     return () => window.clearTimeout(timer);
-  }, [row]);
+  }, [row, animate]);
   const scale = displayH / PET_CELL_H;
   const w = PET_CELL_W * scale;
   const h = PET_CELL_H * scale;
@@ -243,6 +267,10 @@ async function browserCommand<T>(name: string, args: Record<string, unknown>): P
     return [
       { id: "sprout", display_name: "小芽", description: "AskDock 内置的小芽，扒在屏幕边看着你。", spritesheet: "/sprout.png" }
     ] as T;
+  }
+  if (name === "install_pet") {
+    const a = args as { id?: string; displayName?: string; description?: string };
+    return { id: a.id ?? "pet", display_name: a.displayName ?? "pet", description: a.description ?? "", spritesheet: "/sprout.png" } as T;
   }
   if (
     name === "hide_main_window" ||
@@ -924,6 +952,9 @@ function SettingsPage() {
   const [purgeMsg, setPurgeMsg] = React.useState("");
   const [confirmPurge, setConfirmPurge] = React.useState(false);
   const [pets, setPets] = React.useState<PetInfo[]>([]);
+  const [petUrl, setPetUrl] = React.useState("");
+  const [installing, setInstalling] = React.useState(false);
+  const [installMsg, setInstallMsg] = React.useState("");
   const saveTimer = React.useRef<number | undefined>(undefined);
 
   useApplyAppearance(prefs);
@@ -976,6 +1007,54 @@ function SettingsPage() {
       return next;
     });
   }, []);
+
+  // 一键安装：从链接 fetch pet.json + 精灵图（webview 下载，绕过 Rust HTTP），交后端落盘。
+  const installPet = React.useCallback(async () => {
+    const raw = petUrl.trim();
+    if (!raw || installing) return;
+    setInstalling(true);
+    setInstallMsg("下载中…");
+    try {
+      const { petJsonUrl, tryMaster } = normalizePetUrl(raw);
+      const candidates = tryMaster ? [petJsonUrl, petJsonUrl.replace("/main/", "/master/")] : [petJsonUrl];
+      let json: Record<string, unknown> | null = null;
+      let baseUrl = "";
+      for (const url of candidates) {
+        try {
+          const r = await fetch(url);
+          if (r.ok) {
+            json = await r.json();
+            baseUrl = url.replace(/[^/]*$/, "");
+            break;
+          }
+        } catch {
+          /* try next */
+        }
+      }
+      if (!json) throw new Error("找不到 pet.json（链接要指向含 pet.json 的目录或文件）");
+      const spritePath = String(json.spritesheetPath || "spritesheet.webp");
+      const sr = await fetch(new URL(spritePath, baseUrl).toString());
+      if (!sr.ok) throw new Error("精灵图下载失败");
+      const b64 = arrayBufferToBase64(await sr.arrayBuffer());
+      const ext = (spritePath.split(".").pop() || "webp").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const id = String(json.id || raw.split(/[/?#]/).filter(Boolean).pop() || "pet");
+      const info = await command<PetInfo>("install_pet", {
+        id,
+        displayName: String(json.displayName || id),
+        description: String(json.description || ""),
+        spriteB64: b64,
+        ext
+      });
+      await loadPets();
+      update({ notch_mascot: info.id });
+      setInstallMsg(`已安装并选用：${info.display_name}`);
+      setPetUrl("");
+    } catch (e) {
+      setInstallMsg("安装失败：" + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setInstalling(false);
+    }
+  }, [petUrl, installing, loadPets, update]);
 
   const runPurge = React.useCallback(async () => {
     setConfirmPurge(false);
@@ -1032,6 +1111,9 @@ function SettingsPage() {
       <aside className="prefsSidebar">
         <button className={cat === "appearance" ? "on" : ""} type="button" onClick={() => setCat("appearance")}>
           <Palette size={16} /> <span>外观</span>
+        </button>
+        <button className={cat === "pet" ? "on" : ""} type="button" onClick={() => setCat("pet")}>
+          <Cat size={16} /> <span>小人</span>
         </button>
         <button className={cat === "font" ? "on" : ""} type="button" onClick={() => setCat("font")}>
           <Type size={16} /> <span>字体</span>
@@ -1101,10 +1183,14 @@ function SettingsPage() {
                 <Segmented value={prefs.group_native_windows ? "on" : "off"} onChange={(v) => update({ group_native_windows: v === "on" })} options={[["on", "开"], ["off", "关"]]} />
               </div>
             </div>
+          </>
+        )}
 
-            <div className="prefsGroupTitle" style={{ marginTop: 18 }}>收起到边缘</div>
+        {cat === "pet" && (
+          <>
+            <div className="prefsGroupTitle">收起到边缘</div>
             <div className="prefsHint">点标题栏的收起按钮把浮窗收成屏幕右缘的小把手，收起后这样展开：</div>
-            <div className="prefsCard">
+            <div className="prefsCard petCard">
               <div className="prefsRow">
                 <span>展开方式<br /><i className="rowSub">悬停：移上去临时滑出、移开收回；点击：点一下展开成正常浮窗</i></span>
                 <Segmented value={prefs.notch_expand === "click" ? "click" : "hover"} onChange={(v) => update({ notch_expand: v })} options={[["hover", "悬停"], ["click", "点击"]]} />
@@ -1131,7 +1217,7 @@ function SettingsPage() {
                     title={p.description || p.display_name}
                   >
                     <span className="petChoiceArt">
-                      <PetSprite sheet={p.spritesheet} state="idle" displayH={66} />
+                      <PetSprite sheet={p.spritesheet} state="idle" displayH={66} animate={false} />
                     </span>
                     <span className="petChoiceName">{p.display_name}</span>
                   </button>
@@ -1143,6 +1229,19 @@ function SettingsPage() {
                 </button>
                 <button type="button" className="petBtn ghost" onClick={loadPets}>刷新</button>
               </div>
+              <div className="petInstall">
+                <input
+                  type="text"
+                  value={petUrl}
+                  placeholder="粘贴宠物链接（GitHub 仓库/目录/pet.json）"
+                  onChange={(e) => setPetUrl(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") installPet(); }}
+                />
+                <button type="button" className="petBtn" disabled={installing || !petUrl.trim()} onClick={installPet}>
+                  {installing ? "安装中…" : "一键安装"}
+                </button>
+              </div>
+              {installMsg ? <div className="prefsHint petInstallMsg">{installMsg}</div> : null}
               <div className="prefsHint petGalleryHint">
                 沿用 Codex Pets 格式：把社区做好的小人（一个含 <code>pet.json</code> + 精灵图的文件夹）拖进该目录，点刷新即可选用。
               </div>

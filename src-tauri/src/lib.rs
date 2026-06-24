@@ -191,6 +191,7 @@ pub fn run() {
             set_prefs,
             list_pets,
             open_pets_dir,
+            install_pet,
             open_settings,
             show_main_window,
             hide_main_window
@@ -205,9 +206,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
 
-    TrayIconBuilder::new()
-        .tooltip("AskDock")
-        .menu(&menu)
+    let mut builder = TrayIconBuilder::new().tooltip("AskDock").menu(&menu);
+    // 不设图标时 macOS 菜单栏里看不到托盘项，窗口隐藏后就无从唤出 → 用 app 默认图标。
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
                 let _ = show_window(app);
@@ -614,6 +618,64 @@ fn open_pets_dir(app: AppHandle) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+/// 把前端下载好的宠物（pet.json 字段 + 精灵图字节 base64）落盘到 $APPDATA/pets/<id>/。
+/// 下载本身在 webview 里用 fetch 做（避免引入 Rust HTTP 依赖），后端只负责写文件。
+#[tauri::command]
+fn install_pet(
+    app: AppHandle,
+    id: String,
+    display_name: String,
+    description: String,
+    sprite_b64: String,
+    ext: String,
+) -> Result<PetInfo, String> {
+    let id: String = id
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if id.is_empty() {
+        return Err("宠物 id 不合法".to_string());
+    }
+    let ext = match ext.to_lowercase().as_str() {
+        "webp" | "png" | "gif" => ext.to_lowercase(),
+        _ => "webp".to_string(),
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(sprite_b64.as_bytes())
+        .map_err(|_| "精灵图解码失败".to_string())?;
+    if bytes.len() < 100 {
+        return Err("精灵图为空或过小".to_string());
+    }
+    let dir = pets_dir(&app)?.join(&id);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let sprite_name = format!("spritesheet.{ext}");
+    fs::write(dir.join(&sprite_name), &bytes).map_err(|error| error.to_string())?;
+    let display_name = if display_name.trim().is_empty() {
+        id.clone()
+    } else {
+        display_name.trim().to_string()
+    };
+    let description = description.trim().to_string();
+    let manifest = serde_json::json!({
+        "id": id,
+        "displayName": display_name,
+        "description": description,
+        "spritesheetPath": sprite_name,
+    });
+    fs::write(
+        dir.join("pet.json"),
+        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(PetInfo {
+        id,
+        display_name,
+        description,
+        spritesheet: dir.join(&sprite_name).to_string_lossy().to_string(),
+    })
 }
 
 /// 给窗口加/去 macOS 毛玻璃(NSVisualEffectView)。需要窗口透明 + CSS 半透明背景才看得到。

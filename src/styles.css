@@ -200,8 +200,10 @@ svg { display: block; }
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  padding: 4px 14px 4px; /* 左右对齐其它设置行，别贴卡片边；上方由 petRow 的 padding 留白 */
+  padding: 4px 14px 6px;
 }
+/* 小人分类的卡片：左右多留一点内边距，里面所有内容不贴卡片边（统一退到 ~20px）。 */
+.prefsCard.petCard { padding: 0 6px; }
 .petChoice {
   display: flex;
   flex-direction: column;
@@ -229,7 +231,7 @@ svg { display: block; }
   height: 66px;
 }
 .petChoiceName { font-size: 12px; line-height: 1; }
-.petActions { display: flex; gap: 8px; margin: 14px 14px 2px; }
+.petActions { display: flex; gap: 8px; margin: 14px 14px 0; }
 .petBtn {
   display: inline-flex;
   align-items: center;
@@ -244,7 +246,21 @@ svg { display: block; }
 }
 .petBtn:hover { background: var(--hover); }
 .petBtn.ghost { color: var(--dim); }
-.petGalleryHint { margin: 10px 14px 14px; }
+.petInstall { display: flex; gap: 8px; margin: 16px 14px 14px; }
+.petInstall input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+.petInstall input::placeholder { color: var(--faint); }
+.petInstall .petBtn { flex: none; }
+.petInstallMsg { margin: 8px 14px 0; }
+.petGalleryHint { margin: 4px 14px 16px; padding-top: 14px; border-top: 1px solid var(--hairline); line-height: 1.6; }
 .petGalleryHint code {
   font-family: var(--mono);
   font-size: 11px;
@@ -696,6 +712,7 @@ svg { display: block; }
 /* 分段控件 */
 .segmented {
   display: inline-flex;
+  flex-shrink: 0;
   padding: 2px;
   border-radius: 7px;
   background: var(--bg);
@@ -709,6 +726,7 @@ svg { display: block; }
   color: var(--dim);
   background: none;
   font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
