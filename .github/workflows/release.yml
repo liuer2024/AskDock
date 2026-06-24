@@ -1,0 +1,50 @@
+name: Release
+
+# 打一个 v* 标签即触发：构建 macOS 通用包（Apple Silicon + Intel）并创建 GitHub Release。
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {} # 也可在 Actions 页手动触发（用于验证构建）
+
+jobs:
+  release:
+    permissions:
+      contents: write # 创建 Release / 上传产物需要
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build & release (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'AskDock ${{ github.ref_name }}'
+          releaseBody: |
+            macOS 通用包（Apple Silicon + Intel）。
+
+            > 未签名应用：首次打开若被拦，右键图标 → 打开，或在「系统设置 → 隐私与安全性」里点「仍要打开」。
+          releaseDraft: true # 先生成草稿 Release，确认无误后在网页点 Publish
+          prerelease: false
+          args: --target universal-apple-darwin
