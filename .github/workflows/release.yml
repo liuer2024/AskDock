@@ -45,6 +45,6 @@ jobs:
             macOS 通用包（Apple Silicon + Intel）。
 
             > 未签名应用：首次打开若被拦，右键图标 → 打开，或在「系统设置 → 隐私与安全性」里点「仍要打开」。
-          releaseDraft: true # 先生成草稿 Release，确认无误后在网页点 Publish
+          releaseDraft: false # 打 v* 标签后直接公开发布（不再生成草稿）
           prerelease: false
           args: --target universal-apple-darwin
