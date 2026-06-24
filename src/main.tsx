@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Cat, Check, Copy, Filter, Folder, Info, Palette, PanelRight, PanelRightClose, PanelRightOpen, Settings, Type, X, Zap } from "lucide-react";
+import { Cat, Check, ChevronDown, Copy, Filter, Folder, Info, Palette, PanelRight, PanelRightClose, PanelRightOpen, Settings, Type, X, Zap } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -379,6 +379,55 @@ function Segmented({ value, onChange, options }: { value: string; onChange: (v: 
           {label}
         </button>
       ))}
+    </div>
+  );
+}
+
+// 主题下拉：收起时只显示当前主题的色点+名，展开是带色点的列表（紧凑又保留配色预览）。
+function ThemeDots({ t }: { t: (typeof THEMES)[number] }) {
+  return (
+    <span className="dotpair">
+      <span className="d" style={{ background: t.bg, border: "1px solid rgba(125,125,135,.4)" }} />
+      <span className="d" style={{ background: t.a }} />
+      <span className="d" style={{ background: t.b }} />
+    </span>
+  );
+}
+
+function ThemeSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  const cur = THEMES.find((t) => t.id === value) ?? THEMES[0];
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDoc);
+    return () => window.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  return (
+    <div className="themeSelect" ref={ref}>
+      <button type="button" className="themeCurrent" onClick={() => setOpen((o) => !o)}>
+        <ThemeDots t={cur} />
+        <span className="themeName">{cur.name}</span>
+        <ChevronDown size={14} className="themeChevron" />
+      </button>
+      {open ? (
+        <div className="themeMenu">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`themeOption ${t.id === value ? "on" : ""}`}
+              onClick={() => { onChange(t.id); setOpen(false); }}
+            >
+              <ThemeDots t={t} />
+              <span className="themeName">{t.name}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1133,23 +1182,10 @@ function SettingsPage() {
         {cat === "appearance" && (
           <>
             <div className="prefsGroupTitle">主题</div>
-            <div className="prefsCard">
-              <div className="swatches">
-                {THEMES.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    className={`swatch ${prefs.theme === t.id ? "on" : ""}`}
-                    onClick={() => update({ theme: t.id })}
-                  >
-                    <span className="dotpair">
-                      <span className="d" style={{ background: t.bg, border: "1px solid rgba(125,125,135,.4)" }} />
-                      <span className="d" style={{ background: t.a }} />
-                      <span className="d" style={{ background: t.b }} />
-                    </span>
-                    {t.name}
-                  </button>
-                ))}
+            <div className="prefsCard themeCard">
+              <div className="prefsRow">
+                <span>配色</span>
+                <ThemeSelect value={prefs.theme} onChange={(v) => update({ theme: v })} />
               </div>
             </div>
             <div className="prefsGroupTitle" style={{ marginTop: 18 }}>玻璃（macOS）</div>
@@ -1371,9 +1407,11 @@ function SettingsPage() {
             <div className="prefsCard aboutBox">
               <div className="aboutTitle">
                 <strong>AskDock</strong>
+                <span className="cnName">问迹</span>
                 <span className="ver">v0.1.0</span>
               </div>
-              <p>自动收集你在终端里问 AI 的提问，按终端窗口归类，切回窗口就能看到当时在问什么。</p>
+              <p className="aboutSlogan">你问过的，都还在窗边。</p>
+              <p>问迹自动收集你在终端里问 AI（Claude Code、Codex）的提问，按终端窗口归类——切回某个窗口，就想起自己在这做到哪、问过什么。不读终端内容、不用手动输入，只是安静地替你记着；收起时还会变成一只扒在屏幕边的小宠物。</p>
               <p className="aboutMuted">提问来源：Claude Code、Codex 的会话记录</p>
             </div>
           </>
